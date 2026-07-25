@@ -552,6 +552,9 @@ class WatchViewModel : ViewModel() {
      * working source on one awkward episode silently re-pointed every future title at it. The
      * lasting choice now lives in Settings ▸ Servers, where it can be ranked and seen.
      */
+    /** The merged episode catalog, for callers that resolve episodes outside the current one. */
+    fun episodeCatalog(): EpisodesResult = mergedEpisodes
+
     fun changeSource(providerName: String, categoryApi: String) {
         DiagnosticsLog.event("Watch changeSource requested provider=$providerName category=$categoryApi")
         switchSource(providerName, categoryApi, rememberProvider = false)

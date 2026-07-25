@@ -127,6 +127,7 @@ fun EmbedWebView(
     onSelectEpisode: ((Int) -> Unit)? = null,
 ) {
     val device = LocalAppDeviceProfile.current
+    val playerGestures by SettingsStore.playerGestures.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = context.findLifecycleOwner()
     DisposableEffect(Unit) { onDispose { resetPlayerBrightness(context) } }
@@ -827,6 +828,7 @@ fun EmbedWebView(
         if (touchControlsActive) PlayerGestureControls(
             positionMs = positionMs,
             durationMs = durationMs,
+            dragGestures = playerGestures,
             onTap = {
                 touchControlsVisible = !touchControlsVisible
                 touchControlsInteraction++

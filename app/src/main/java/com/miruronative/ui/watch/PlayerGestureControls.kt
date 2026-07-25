@@ -113,6 +113,13 @@ internal fun PlayerGestureControls(
     onDoubleTap: (() -> Unit)? = null,
     onSeek: ((Long) -> Unit)? = null,
     onHoldSpeed: ((active: Boolean) -> Unit)? = null,
+    /**
+     * Brightness, volume, drag-to-seek and hold-to-speed. Turning these off deliberately leaves
+     * the overlay itself in place: it is what reveals the controls on tap, and on embed players it
+     * is also what stops the page seeing touches at all, which is what keeps tap-hijack ads and
+     * the provider's own chrome out of the way. Only the drags go quiet.
+     */
+    dragGestures: Boolean = true,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -141,7 +148,7 @@ internal fun PlayerGestureControls(
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(activity, audioManager) {
+                .pointerInput(activity, audioManager, dragGestures) {
                     val slop = viewConfiguration.touchSlop
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
@@ -149,6 +156,7 @@ internal fun PlayerGestureControls(
                         val edge = (size.width * GESTURE_EDGE_FRACTION)
                             .coerceIn(GESTURE_EDGE_MIN.toPx(), GESTURE_EDGE_MAX.toPx())
                         val zone = when {
+                            !dragGestures -> null
                             down.position.x <= edge -> GestureZone.Brightness
                             down.position.x >= size.width - edge -> GestureZone.Volume
                             else -> null
@@ -168,7 +176,7 @@ internal fun PlayerGestureControls(
                         val holdDeadline = down.uptimeMillis + viewConfiguration.longPressTimeoutMillis
 
                         while (true) {
-                            val event = if (dragAxis == null && !holding && currentOnHoldSpeed != null) {
+                            val event = if (dragAxis == null && !holding && dragGestures && currentOnHoldSpeed != null) {
                                 val remaining = holdDeadline - android.os.SystemClock.uptimeMillis()
                                 if (remaining <= 0) {
                                     null
@@ -202,7 +210,7 @@ internal fun PlayerGestureControls(
                             }
                             when (dragAxis) {
                                 GestureDragAxis.Horizontal -> {
-                                    if (currentOnSeek != null && seekDurationMs > 0L) {
+                                    if (dragGestures && currentOnSeek != null && seekDurationMs > 0L) {
                                         val target = playerSlideSeekTarget(
                                             startPositionMs = seekStartPositionMs,
                                             durationMs = seekDurationMs,

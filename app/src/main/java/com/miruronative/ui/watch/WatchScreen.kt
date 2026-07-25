@@ -79,6 +79,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -123,6 +124,8 @@ import com.miruronative.playback.EpisodeDownload
 import com.miruronative.playback.EpisodeDownloadMetadata
 import com.miruronative.playback.EpisodeDownloadState
 import com.miruronative.playback.EpisodeDownloadSubtitle
+import com.miruronative.playback.BulkDownloadOutcome
+import com.miruronative.playback.BulkEpisodeDownloads
 import com.miruronative.playback.DownloadStorage
 import com.miruronative.playback.EpisodeDownloads
 import com.miruronative.playback.PlaybackService
@@ -354,6 +357,19 @@ fun WatchScreen(
                     onPlaybackError = vm::onPlaybackError,
                     onPlaybackStopperChanged = { embeddedPlaybackStopper = it },
                     onPlayerClosed = vm::commitPlaybackPosition,
+                    onDownloadSeries = { episodes, quality ->
+                        BulkEpisodeDownloads.start(
+                            context = context,
+                            anilistId = s.data.anilistId,
+                            seriesTitle = s.data.seriesTitle,
+                            artworkUrl = s.data.artworkUrl,
+                            category = s.data.category,
+                            preferredProvider = s.data.provider,
+                            episodes = episodes,
+                            catalog = vm.episodeCatalog(),
+                            quality = quality,
+                        )
+                    },
                 )
             }
         }
@@ -379,6 +395,8 @@ private fun WatchContent(
     onPlaybackError: (String, String, Long) -> Unit,
     onPlaybackStopperChanged: (((() -> Unit)?) -> Unit)? = null,
     onPlayerClosed: () -> Unit = {},
+    /** Starts a batch download of [episodes]; the catalog it needs lives with the ViewModel. */
+    onDownloadSeries: (List<EpisodeItem>, DownloadQuality) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
@@ -403,6 +421,20 @@ private fun WatchContent(
         data.provider,
     ) { mutableStateOf(false) }
     var selectedDownloadQuality by remember { mutableStateOf(defaultDownloadQuality) }
+    // 1 means just the episode on screen; anything larger is a bounded batch.
+    var downloadBatchSize by remember { mutableIntStateOf(1) }
+    // Everything from the current episode onward that is not already saved — the batch a viewer
+    // starting partway through actually wants, rather than re-fetching what they have.
+    val remainingEpisodes = remember(data.episodes, data.current.number, data.anilistId, data.category, downloads) {
+        BulkEpisodeDownloads.pendingEpisodes(
+            episodes = data.episodes,
+            anilistId = data.anilistId,
+            category = data.category.api,
+            fromNumber = data.current.number,
+            alreadyHave = downloads.filter { it.state == EpisodeDownloadState.COMPLETED }
+                .map { it.id }.toSet(),
+        )
+    }
     var selectedDownloadDestination by remember { mutableStateOf(defaultDownloadDestination) }
     var pendingDownloadAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -539,12 +571,20 @@ private fun WatchContent(
             alreadyInApp = episodeDownload?.state == EpisodeDownloadState.COMPLETED,
             onQualityChange = { selectedDownloadQuality = it },
             onDestinationChange = { selectedDownloadDestination = it },
+            batchSize = downloadBatchSize,
+            onBatchSizeChange = { downloadBatchSize = it },
+            remainingCount = remainingEpisodes.size,
             onDismiss = { downloadDialogVisible = false },
             onConfirm = {
                 val quality = selectedDownloadQuality
                 val destination = selectedDownloadDestination
+                val batch = downloadBatchSize
                 downloadDialogVisible = false
-                queueCurrentEpisode(quality, destination)
+                if (batch > 1 && remainingEpisodes.isNotEmpty()) {
+                    onDownloadSeries(remainingEpisodes.take(batch), quality)
+                } else {
+                    queueCurrentEpisode(quality, destination)
+                }
             },
         )
     }
@@ -1235,6 +1275,9 @@ private fun EpisodeDownloadDialog(
     alreadyInApp: Boolean,
     onQualityChange: (DownloadQuality) -> Unit,
     onDestinationChange: (DownloadDestination) -> Unit,
+    batchSize: Int,
+    onBatchSizeChange: (Int) -> Unit,
+    remainingCount: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -1244,7 +1287,11 @@ private fun EpisodeDownloadDialog(
     val device = LocalAppDeviceProfile.current
     // Recomputed per chosen resolution: the estimate, and therefore the warning, depends on it.
     val freeBytes = remember(quality) { DownloadStorage.freeBytes(context) }
-    val estimatedBytes = remember(quality) { DownloadStorage.estimatedEpisodeBytes(quality.maxHeight) }
+    val perEpisodeBytes = remember(quality) { DownloadStorage.estimatedEpisodeBytes(quality.maxHeight) }
+    val batchCount = batchSize.coerceAtMost(remainingCount)
+    val batching = batchCount > 1
+    // The estimate has to follow the choice: twenty-five episodes is a different question to one.
+    val estimatedBytes = perEpisodeBytes * (if (batching) batchCount.toLong() else 1L)
     val tight = freeBytes <= estimatedBytes + DownloadStorage.HEADROOM_BYTES
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1322,6 +1369,57 @@ private fun EpisodeDownloadDialog(
                     )
                 }
 
+                if (remainingCount > 0) {
+                    Text(
+                        "How much",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 18.dp),
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(top = 6.dp),
+                    ) {
+                        FilterChip(
+                            selected = !batching,
+                            onClick = { onBatchSizeChange(1) },
+                            label = { Text("This episode") },
+                            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                        )
+                        // Bounded sizes rather than "everything": a 500-episode run is ~200 GB and
+                        // hours of provider requests, which is not a choice worth offering.
+                        BulkEpisodeDownloads.BATCH_SIZES
+                            .filter { it <= remainingCount }
+                            .forEach { size ->
+                                FilterChip(
+                                    selected = batchCount == size,
+                                    onClick = { onBatchSizeChange(size) },
+                                    label = { Text("Next $size") },
+                                    modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                                )
+                            }
+                        // When fewer remain than the smallest batch, offer exactly what is left.
+                        if (remainingCount > 1 && BulkEpisodeDownloads.BATCH_SIZES.none { it <= remainingCount }) {
+                            FilterChip(
+                                selected = batching,
+                                onClick = { onBatchSizeChange(remainingCount) },
+                                label = { Text("All $remainingCount left") },
+                                modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                            )
+                        }
+                    }
+                    if (batching) {
+                        Text(
+                            "Episodes are fetched one at a time, and each one's source is resolved " +
+                                "as its turn comes — links from these servers expire too quickly to " +
+                                "collect up front. You can keep watching while it runs.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+
                 Text(
                     "Storage",
                     style = MaterialTheme.typography.titleSmall,
@@ -1332,7 +1430,7 @@ private fun EpisodeDownloadDialog(
                     buildString {
                         append("About ")
                         append(Formatter.formatShortFileSize(context, estimatedBytes))
-                        append(" for this episode · ")
+                        append(if (batching) " for $batchCount episodes · " else " for this episode · ")
                         append(Formatter.formatShortFileSize(context, freeBytes))
                         append(" free")
                         // A stick has a few GB total, so the count is a genuinely useful number
@@ -1360,7 +1458,13 @@ private fun EpisodeDownloadDialog(
         },
         confirmButton = {
             TextButton(onClick = onConfirm, enabled = confirmEnabled) {
-                Text(if (tight) "Download anyway" else "Download")
+                Text(
+                    when {
+                        tight -> "Download anyway"
+                        batching -> "Download $batchCount"
+                        else -> "Download"
+                    },
+                )
             }
         },
         dismissButton = {
@@ -1479,6 +1583,7 @@ private fun MobileWatchDetails(
                     modifier = Modifier.padding(horizontal = pad, vertical = 5.dp),
                 )
             }
+            BulkDownloadStatus(modifier = Modifier.padding(horizontal = pad))
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = pad, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -2358,3 +2463,56 @@ private fun BackButton(onBack: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
+
+/**
+ * Status line for a running batch download.
+ *
+ * Batches take minutes and queue their episodes one at a time, so without this the only feedback
+ * is downloads quietly appearing in the Library — easily read as nothing happening.
+ */
+@Composable
+private fun BulkDownloadStatus(modifier: Modifier = Modifier) {
+    val progress by BulkEpisodeDownloads.progress.collectAsState()
+    val state = progress ?: return
+
+    Row(
+        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (state.isRunning) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        Text(
+            text = when (state.outcome) {
+                BulkDownloadOutcome.RUNNING -> buildString {
+                    append("Downloading ${state.done + 1} of ${state.total}")
+                    state.current?.let { append(" · episode $it") }
+                }
+                BulkDownloadOutcome.FINISHED ->
+                    "Queued ${state.queued} of ${state.total}" +
+                        if (state.failed > 0) " · ${state.failed} had no downloadable source" else ""
+                BulkDownloadOutcome.CANCELLED -> "Stopped after ${state.queued} of ${state.total}"
+                BulkDownloadOutcome.OUT_OF_SPACE ->
+                    "Out of space after ${state.queued} of ${state.total}"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = if (state.outcome == BulkDownloadOutcome.OUT_OF_SPACE) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = { if (state.isRunning) BulkEpisodeDownloads.cancel() else BulkEpisodeDownloads.dismiss() },
+            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+        ) {
+            Text(if (state.isRunning) "Stop" else "Dismiss")
+        }
+    }
+}

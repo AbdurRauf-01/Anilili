@@ -146,6 +146,14 @@ object SettingsStore {
     private val _hideAdultContent = MutableStateFlow(true)
     val hideAdultContent = _hideAdultContent.asStateFlow()
 
+    /**
+     * Brightness, volume and drag-to-seek gestures over the picture. Off means the player only
+     * responds to its on-screen controls — the edge drags are easy to trigger by accident when
+     * you are only trying to reveal the bar. TV never had them.
+     */
+    private val _playerGestures = MutableStateFlow(true)
+    val playerGestures = _playerGestures.asStateFlow()
+
     private val _subtitlesWithDub = MutableStateFlow(false)
     val subtitlesWithDub = _subtitlesWithDub.asStateFlow()
 
@@ -272,6 +280,11 @@ object SettingsStore {
         _preferredProvider.value = clean.firstOrNull() ?: DEFAULT_PREFERRED_PROVIDER
     }
 
+    fun setPlayerGestures(value: Boolean) {
+        _playerGestures.value = value
+        scope.launch { store.edit { it[PLAYER_GESTURES] = value } }
+    }
+
     fun setLastWorkingPipeOrigin(value: String) {
         if (_lastWorkingPipeOrigin.value == value) return
         _lastWorkingPipeOrigin.value = value
@@ -360,6 +373,7 @@ object SettingsStore {
             prefs[SERVER_PRIORITY]?.takeIf(String::isNotBlank)?.split(",")
                 ?: listOfNotNull(prefs[PREFERRED_PROVIDER]?.takeIf(String::isNotBlank)),
         )
+        _playerGestures.value = prefs[PLAYER_GESTURES] ?: true
         _lastWorkingPipeOrigin.value = prefs[LAST_PIPE_ORIGIN].orEmpty()
         loaded.value = true
     }
@@ -404,5 +418,6 @@ object SettingsStore {
     private val PREFERRED_PROVIDER = stringPreferencesKey("preferred_provider")
     private val SERVER_PRIORITY = stringPreferencesKey("server_priority")
     private val LAST_PIPE_ORIGIN = stringPreferencesKey("last_pipe_origin")
+    private val PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }

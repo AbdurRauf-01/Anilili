@@ -15,11 +15,19 @@ import org.junit.Test
 class WatchSourcePolicyTest {
 
     @Test
-    fun `playback speeds include fine adjustments around normal speed`() {
-        assertTrue(PlaybackSpeeds.containsAll(listOf(1f, 1.05f, 1.1f, 1.15f, 1.2f, 1.25f)))
+    fun `playback speeds cover rewatching without crowding the slider`() {
+        // The list is slider notches, so its length is the usability budget. It used to spend
+        // eight of fifteen steps between 0.9x and 1.3x, leaving nothing above 2x for rewatching.
+        assertTrue("normal speed must be selectable", 1f in PlaybackSpeeds)
+        assertTrue("a nudge either side of normal is enough", PlaybackSpeeds.containsAll(listOf(0.9f, 1.1f)))
+        assertTrue("rewatching wants the fast end", PlaybackSpeeds.containsAll(listOf(2f, 3f, 4f)))
+        assertEquals("4x is the ceiling", 4f, PlaybackSpeeds.max())
+        assertTrue("the slider stays readable", PlaybackSpeeds.size <= 15)
+
         assertEquals(PlaybackSpeeds.sorted(), PlaybackSpeeds)
         assertEquals(PlaybackSpeeds.distinct(), PlaybackSpeeds)
-        assertEquals("1.15x", 1.15f.formatPlaybackSpeed())
+        assertEquals("2.5x", 2.5f.formatPlaybackSpeed())
+        assertEquals("4x", 4f.formatPlaybackSpeed())
     }
     @Test
     fun `kiwi uses embed because fixed quality CDN streams require page state`() {

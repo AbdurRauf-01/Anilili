@@ -353,11 +353,14 @@ object EpisodeDownloads {
         initialize(context)
         val app = context.applicationContext
         val format = directFileFormat(stream)
+        // Each series gets its own folder under Downloads/Anilili. A long-runner otherwise buries
+        // everything else in the same flat list, and the file manager has no way to group them.
+        val seriesFolder = safeFilePart(metadata.seriesTitle).take(80).trim()
         val fileName = uniqueDeviceFileName(
             context = app,
+            seriesFolder = seriesFolder,
             stem = buildString {
-                append(safeFilePart(metadata.seriesTitle))
-                append(" - Episode ")
+                append("Episode ")
                 append(safeFilePart(metadata.episodeNumber))
                 metadata.episodeTitle
                     ?.takeIf(String::isNotBlank)
@@ -378,7 +381,7 @@ object EpisodeDownloads {
             )
             .setDestinationInExternalPublicDir(
                 Environment.DIRECTORY_DOWNLOADS,
-                "$PUBLIC_DOWNLOAD_SUBDIRECTORY/$fileName",
+                "$PUBLIC_DOWNLOAD_SUBDIRECTORY/$seriesFolder/$fileName",
             )
         (requestHeaders(metadata) + ("User-Agent" to userAgent)).forEach { (name, value) ->
             if (name.isNotBlank() && value.isNotBlank() && '\n' !in value && '\r' !in value) {
@@ -656,10 +659,11 @@ object EpisodeDownloads {
     @android.annotation.TargetApi(Build.VERSION_CODES.Q)
     private fun uniqueDeviceFileName(
         context: Context,
+        seriesFolder: String,
         stem: String,
         extension: String,
     ): String {
-        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$PUBLIC_DOWNLOAD_SUBDIRECTORY/"
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$PUBLIC_DOWNLOAD_SUBDIRECTORY/$seriesFolder/"
         var copy = 1
         while (copy <= 999) {
             val suffix = if (copy == 1) "" else " ($copy)"

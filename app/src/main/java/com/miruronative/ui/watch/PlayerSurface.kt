@@ -228,6 +228,7 @@ fun PlayerSurface(
 ) {
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
+    val playerGestures by SettingsStore.playerGestures.collectAsState()
     DisposableEffect(Unit) { onDispose { resetPlayerBrightness(context) } }
     // Each episode starts from what the loader measured for this stream, so a shift the viewer
     // dialled in for a broken one never follows them into the next.
@@ -903,6 +904,7 @@ fun PlayerSurface(
             PlayerGestureControls(
                 positionMs = positionMs,
                 durationMs = durationMs,
+                dragGestures = playerGestures,
                 onTap = {
                     phoneControlsVisible = !phoneControlsVisible
                     phoneControlsInteraction++
@@ -1535,22 +1537,31 @@ private data class TrackOption(
     val selected: Boolean,
 )
 
+/**
+ * Speeds offered by the player, as slider notches.
+ *
+ * The old list spent eight of its fifteen steps between 0.9x and 1.3x, which made every notch
+ * narrow and hard to land on. Two nudge steps either side of normal are enough for the drift this
+ * was there to correct; the room that frees up goes to the fast end, where rewatching lives.
+ *
+ * Past roughly 2x, time-stretched audio gets steadily harder to follow, and some hardware decoders
+ * struggle beyond 3x — these are offered, not recommended.
+ */
 internal val PlaybackSpeeds = listOf(
     0.25f,
     0.5f,
     0.75f,
     0.9f,
-    0.95f,
     1f,
-    1.05f,
     1.1f,
-    1.15f,
-    1.2f,
     1.25f,
-    1.3f,
     1.5f,
     1.75f,
     2f,
+    2.5f,
+    3f,
+    3.5f,
+    4f,
 )
 
 private fun Int.stateName(): String = when (this) {

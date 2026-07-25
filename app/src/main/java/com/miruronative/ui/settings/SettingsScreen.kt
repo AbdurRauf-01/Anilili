@@ -114,6 +114,7 @@ fun SettingsScreen(
     val autoSync by SettingsStore.autoSyncAniList.collectAsState()
     val preferDub by SettingsStore.preferDub.collectAsState()
     val defaultQuality by SettingsStore.defaultQuality.collectAsState()
+    val playerGestures by SettingsStore.playerGestures.collectAsState()
     val serverPriority by SettingsStore.serverPriority.collectAsState()
     val downloadQuality by SettingsStore.downloadQuality.collectAsState()
     val downloadDestination by SettingsStore.downloadDestination.collectAsState()
@@ -314,6 +315,15 @@ fun SettingsScreen(
                     "Show subtitles on dubbed episodes too (applies from the next episode)",
                     subtitlesWithDub,
                     SettingsStore::setSubtitlesWithDub,
+                )
+            }
+            item {
+                SettingSwitch(
+                    "Player touch gestures",
+                    "Swipe the left edge for brightness, the right for volume, across for seek. " +
+                        "Tap to show the controls either way.",
+                    playerGestures,
+                    SettingsStore::setPlayerGestures,
                 )
             }
             item {

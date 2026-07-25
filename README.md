@@ -3,7 +3,8 @@
 Anilili is a native Android anime streaming client built with Kotlin, Jetpack Compose, and
 Media3. Metadata, login, library lists, and progress sync are powered by AniList or
 MyAnimeList, while episodes and stream sources are resolved from multiple providers:
-Miruro, AniKoto, ReAnime, AniZone, AnimeGG, AniNeko, and 2DHive.
+Miruro, Senshi, AniBD, AniKoto, KickAssAnime, AllAnime, AnimeKai, ReAnime, AniZone,
+AnimeGG, AniNeko, 2DHive, and RareAnimes.
 
 It runs on phones, tablets, Android TV, and Fire TV down to Android 5.1 / Fire OS 5 (API 22).
 
@@ -18,8 +19,8 @@ Additional provider sources are resolved through the Anivexa-backed provider cli
 streams play with ExoPlayer; embed providers and fallback playback use WebView.
 
 > Personal and educational project. This app is not affiliated with AniList, MyAnimeList,
-> Miruro, AniKoto, ReAnime, AniZone, AnimeGG, AniNeko, or 2DHive. It hosts no content;
-> streams are resolved from third-party providers at playback time. Sideloaded APK only.
+> or any of the streaming providers it resolves from. It hosts no content; streams are
+> resolved from third-party providers at playback time. Sideloaded APK only.
 
 ## Screenshots
 
@@ -36,8 +37,12 @@ streams play with ExoPlayer; embed providers and fallback playback use WebView.
 - Home feeds for trending, popular, and recently released anime.
 - Browse and search with genre, tag, year, status, format, rating, and sort filters.
 - Anime details, provider selection, sub/dub selection, ratings, and episode lists.
-- Multi-provider stream discovery across Miruro, AniKoto, ReAnime, AniZone, AnimeGG,
-  AniNeko, and 2DHive.
+- Multi-provider stream discovery across Miruro, Senshi, AniBD, AniKoto, KickAssAnime,
+  AllAnime, AnimeKai, ReAnime, AniZone, AnimeGG, AniNeko, 2DHive, and RareAnimes.
+- Source picker filters by audio (sub/dub) and by spoken or subtitle language, so a dub in
+  a particular language can be found without opening each server in turn.
+- Server priority: rank up to three preferred servers in Settings; the in-player picker
+  changes the server for the current episode only.
 - Native HLS playback with subtitles, skip intro, and auto advance.
 - Background native-HLS episode downloads with external subtitle tracks, progress, offline
   playback, and removal from the Library screen.
@@ -64,7 +69,7 @@ streams play with ExoPlayer; embed providers and fallback playback use WebView.
 Requirements:
 
 - JDK 17
-- Android Studio or Android SDK API 35
+- Android Studio or Android SDK API 36
 - Gradle 8.13 if building from the command line without a generated wrapper
 
 Android Studio:

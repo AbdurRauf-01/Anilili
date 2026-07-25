@@ -485,7 +485,16 @@ private fun ProfileHero(
         when (state) {
             is UiState.Success -> {
                 val viewer = state.data.viewer
-                Box(Modifier.fillMaxWidth().height(if (device.isTv) 230.dp else 180.dp)) {
+                // The tall banner exists to show the account's cover art. Without one it is just
+                // an empty box above the avatar, so collapse it to what the avatar and totals
+                // actually occupy instead of reserving room for a picture that never arrives.
+                val hasBanner = !viewer.bannerImage.isNullOrBlank()
+                val bannerHeight = when {
+                    device.isTv -> if (hasBanner) 230.dp else 148.dp
+                    hasBanner -> 180.dp
+                    else -> 124.dp
+                }
+                Box(Modifier.fillMaxWidth().height(bannerHeight)) {
                     AsyncImage(
                         model = viewer.bannerImage,
                         contentDescription = null,
@@ -512,6 +521,13 @@ private fun ProfileHero(
                             .border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(14.dp)),
                         contentScale = ContentScale.Crop,
                     )
+                    // Level with the avatar, in the banner space that was already empty. The
+                    // gradient above has faded to the surface colour by this point, so the figures
+                    // read as cleanly here as they did in their own card.
+                    ProfileStatsInline(
+                        state.data,
+                        Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                    )
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -522,8 +538,8 @@ private fun ProfileHero(
                             viewer.name,
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Black,
-                            // The totals and two icon buttons now share this row, so a long
-                            // account name has to give way rather than wrap and double its height.
+                            // A long account name gives way to the sync/logout buttons rather
+                            // than wrapping and doubling the row's height.
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -533,9 +549,6 @@ private fun ProfileHero(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    // Totals ride in the header's empty middle rather than in a panel of their own:
-                    // three numbers did not earn a full-width card above the watchlist.
-                    ProfileStatsInline(state.data)
                     IconButton(onClick = onSync, modifier = Modifier.focusHighlight(RoundedCornerShape(9.dp))) {
                         Icon(Icons.Default.Refresh, contentDescription = "Sync AniList")
                     }
@@ -557,15 +570,15 @@ private fun ProfileHero(
     }
 }
 
-/** The three totals, compact enough to sit beside the account name in the header. */
+/** The three totals, sized to sit alongside the avatar on the banner. */
 @Composable
-private fun ProfileStatsInline(profile: AniListProfile) {
+private fun ProfileStatsInline(profile: AniListProfile, modifier: Modifier = Modifier) {
     val stats = profile.viewer.statistics?.anime
     val days = (stats?.minutesWatched ?: 0L) / 1440.0
     Row(
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(end = 8.dp),
+        modifier = modifier,
     ) {
         ProfileStat((stats?.count ?: 0).toString(), "Anime")
         ProfileStat(String.format(Locale.US, "%.1f", days), "Days")

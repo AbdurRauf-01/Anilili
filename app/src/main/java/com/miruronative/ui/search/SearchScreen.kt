@@ -193,9 +193,10 @@ private fun SearchTopBar(
         var fieldFocused by remember { mutableStateOf(false) }
         // Past searches surfaced as an autocomplete list while the field is focused: everything
         // recent when it's empty, narrowing to matches as the user types (the exact current term
-        // drops out — it's already in the box). TV keeps its D-pad grid, so it opts out.
+        // drops out — it's already in the box). TV shows them as a horizontal chip row so D-pad
+        // can reach them; mobile shows a vertical dropdown only while the field is focused.
         val suggestions = remember(history, vm.query, fieldFocused, device.isTv) {
-            if (device.isTv || !fieldFocused) {
+            if (!device.isTv && !fieldFocused) {
                 emptyList()
             } else {
                 val term = vm.query.trim()
@@ -283,15 +284,26 @@ private fun SearchTopBar(
                 }
             }
 
-            SearchSuggestions(
-                suggestions = suggestions,
-                onPick = { term ->
-                    vm.applyHistoryQuery(term)
-                    keyboard?.hide()
-                    focusManager.clearFocus()
-                },
-                onRemove = vm::removeHistoryQuery,
-            )
+            if (device.isTv) {
+                TvSearchHistory(
+                    suggestions = suggestions,
+                    onPick = { term ->
+                        vm.applyHistoryQuery(term)
+                        focusManager.moveFocus(FocusDirection.Down)
+                    },
+                    onRemove = vm::removeHistoryQuery,
+                )
+            } else {
+                SearchSuggestions(
+                    suggestions = suggestions,
+                    onPick = { term ->
+                        vm.applyHistoryQuery(term)
+                        keyboard?.hide()
+                        focusManager.clearFocus()
+                    },
+                    onRemove = vm::removeHistoryQuery,
+                )
+            }
 
             Text(
                 "Categories",
@@ -373,6 +385,57 @@ private fun SearchSuggestions(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * TV-optimised recent searches: a horizontal chip row that D-pad can navigate.
+ * Each chip fills the query on click; a trailing delete icon lets users prune history.
+ */
+@Composable
+private fun TvSearchHistory(
+    suggestions: List<String>,
+    onPick: (String) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    AnimatedVisibility(visible = suggestions.isNotEmpty()) {
+        Column(Modifier.padding(top = 8.dp)) {
+            Text(
+                "Recent searches",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().focusGroup(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(suggestions.take(10), key = { it }) { term ->
+                    AssistChip(
+                        onClick = { onPick(term) },
+                        label = { Text(term, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.History,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Remove $term",
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(CircleShape)
+                                    .clickable { onRemove(term) },
+                            )
+                        },
+                        modifier = Modifier.focusHighlight(RoundedCornerShape(8.dp)),
+                    )
                 }
             }
         }

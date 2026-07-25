@@ -1097,13 +1097,19 @@ fun EmbedWebView(
                 touchControlsActive -> touchControlsVisible
                 else -> fallbackControlsVisible
             }
+            // See PlayerSurface: on a TV the outer ~5% is overscan, so the usual 24.dp corner
+            // inset puts this button off the edge of the picture entirely.
+            val edgeInset = if (device.isTv) TV_SAFE_AREA_INSET else 24.dp
             WebSkipButton(
                 label = label,
                 onClick = onClick,
                 modifier = if (controlsShowing) {
-                    Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp)
+                    Modifier.align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = if (device.isTv) TV_SAFE_AREA_INSET else 16.dp)
                 } else {
-                    Modifier.align(Alignment.BottomStart).padding(start = 24.dp, bottom = 24.dp)
+                    Modifier.align(Alignment.BottomStart)
+                        .padding(start = edgeInset, bottom = edgeInset)
                 },
             )
         }

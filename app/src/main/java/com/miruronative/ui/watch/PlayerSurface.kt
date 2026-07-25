@@ -1164,10 +1164,16 @@ fun PlayerSurface(
         }
         action?.let { (label, onClick) ->
             val controlsVisible = if (device.isTv) tvControlsVisible else phoneControlsVisible
+            // TV sets cut off the outer ~5% of the picture, so 24.dp from the corner lands inside
+            // the overscan and the button is simply never seen — reported as "skip intro doesn't
+            // show on TV" while working on phones. Every other TV surface already insets 48.dp.
+            val edgeInset = if (device.isTv) TV_SAFE_AREA_INSET else 24.dp
             val actionModifier = if (controlsVisible) {
-                Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp)
+                Modifier.align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = if (device.isTv) TV_SAFE_AREA_INSET else 16.dp)
             } else {
-                Modifier.align(Alignment.BottomStart).padding(start = 24.dp, bottom = 24.dp)
+                Modifier.align(Alignment.BottomStart).padding(start = edgeInset, bottom = edgeInset)
             }
             OutlinedButton(
                 onClick = onClick,

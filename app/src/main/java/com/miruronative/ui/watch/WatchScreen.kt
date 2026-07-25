@@ -1799,15 +1799,29 @@ private fun SourceSelectors(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
-                        Text(
-                            text = if (data.preferredProvider == "auto") {
-                                "Applies to this episode only · ${servers.size} available"
-                            } else {
-                                "This episode only · Settings pins ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            if (data.isLoadingMoreSources) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 1.5.dp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                            Text(
+                                text = if (data.isLoadingMoreSources) {
+                                    "Finding servers… ${servers.size} so far"
+                                } else if (data.preferredProvider == "auto") {
+                                    "Applies to this episode only · ${servers.size} available"
+                                } else {
+                                    "This episode only · Settings pins ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 Icons.Default.Bolt,
@@ -1992,15 +2006,29 @@ private fun MobileServerPickerContent(
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Black,
             )
-            Text(
-                text = if (data.preferredProvider == "auto") {
-                    "Applies to this episode only · ${servers.size} available"
-                } else {
-                    "This episode only · Settings pins ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (data.isLoadingMoreSources) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Text(
+                    text = if (data.isLoadingMoreSources) {
+                        "Finding servers… ${servers.size} so far"
+                    } else if (data.preferredProvider == "auto") {
+                        "Applies to this episode only · ${servers.size} available"
+                    } else {
+                        "This episode only · Settings pins ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),

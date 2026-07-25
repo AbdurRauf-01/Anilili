@@ -254,7 +254,6 @@ fun ProfileScreen(
                     }
 
                     profile?.let { loaded ->
-                        item { ProfileStats(loaded) }
                     }
 
                     item {
@@ -519,13 +518,24 @@ private fun ProfileHero(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(viewer.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text(
+                            viewer.name,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Black,
+                            // The totals and two icon buttons now share this row, so a long
+                            // account name has to give way rather than wrap and double its height.
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         Text(
                             listOfNotNull("Signed in via ${state.data.service.label}", joinedLabel(viewer.createdAt)).joinToString("  ·  "),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    // Totals ride in the header's empty middle rather than in a panel of their own:
+                    // three numbers did not earn a full-width card above the watchlist.
+                    ProfileStatsInline(state.data)
                     IconButton(onClick = onSync, modifier = Modifier.focusHighlight(RoundedCornerShape(9.dp))) {
                         Icon(Icons.Default.Refresh, contentDescription = "Sync AniList")
                     }
@@ -547,24 +557,26 @@ private fun ProfileHero(
     }
 }
 
+/** The three totals, compact enough to sit beside the account name in the header. */
 @Composable
-private fun ProfileStats(profile: AniListProfile) {
-    val device = LocalAppDeviceProfile.current
+private fun ProfileStatsInline(profile: AniListProfile) {
     val stats = profile.viewer.statistics?.anime
     val days = (stats?.minutesWatched ?: 0L) / 1440.0
-    Panel(Modifier.padding(horizontal = device.pagePadding)) {
-        Row(Modifier.fillMaxWidth().padding(vertical = 14.dp)) {
-            ProfileStat((stats?.count ?: 0).toString(), "Total anime", Modifier.weight(1f))
-            ProfileStat(String.format(Locale.US, "%.1f", days), "Days watched", Modifier.weight(1f))
-            ProfileStat(String.format(Locale.US, "%.1f", stats?.meanScore ?: 0.0), "Average score", Modifier.weight(1f))
-        }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(end = 8.dp),
+    ) {
+        ProfileStat((stats?.count ?: 0).toString(), "Anime")
+        ProfileStat(String.format(Locale.US, "%.1f", days), "Days")
+        ProfileStat(String.format(Locale.US, "%.1f", stats?.meanScore ?: 0.0), "Score")
     }
 }
 
 @Composable
 private fun ProfileStat(value: String, label: String, modifier: Modifier = Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

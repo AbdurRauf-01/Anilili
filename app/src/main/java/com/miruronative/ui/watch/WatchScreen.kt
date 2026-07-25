@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.view.KeyEvent as AndroidKeyEvent
 import android.widget.Toast
+import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -82,6 +83,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -121,6 +123,7 @@ import com.miruronative.playback.EpisodeDownload
 import com.miruronative.playback.EpisodeDownloadMetadata
 import com.miruronative.playback.EpisodeDownloadState
 import com.miruronative.playback.EpisodeDownloadSubtitle
+import com.miruronative.playback.DownloadStorage
 import com.miruronative.playback.EpisodeDownloads
 import com.miruronative.playback.PlaybackService
 import com.miruronative.data.settings.DownloadDestination
@@ -224,9 +227,7 @@ fun WatchScreen(
     }
 
     LaunchedEffect(Unit) {
-        if (device.isTv) {
-            runCatching { coil.Coil.imageLoader(context).memoryCache?.clear() }
-        }
+        if (device.isTv) releaseImageMemoryForPlayback(context)
     }
 
     // Drive orientation + system bars from the fullscreen flag; restore on leave.
@@ -1239,6 +1240,12 @@ private fun EpisodeDownloadDialog(
 ) {
     val confirmEnabled = !alreadyInApp ||
         (canSaveToDevice && destination.includesDevice)
+    val context = LocalContext.current
+    val device = LocalAppDeviceProfile.current
+    // Recomputed per chosen resolution: the estimate, and therefore the warning, depends on it.
+    val freeBytes = remember(quality) { DownloadStorage.freeBytes(context) }
+    val estimatedBytes = remember(quality) { DownloadStorage.estimatedEpisodeBytes(quality.maxHeight) }
+    val tight = freeBytes <= estimatedBytes + DownloadStorage.HEADROOM_BYTES
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Download episode") },
@@ -1314,11 +1321,46 @@ private fun EpisodeDownloadDialog(
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }
+
+                Text(
+                    "Storage",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 18.dp),
+                )
+                Text(
+                    buildString {
+                        append("About ")
+                        append(Formatter.formatShortFileSize(context, estimatedBytes))
+                        append(" for this episode · ")
+                        append(Formatter.formatShortFileSize(context, freeBytes))
+                        append(" free")
+                        // A stick has a few GB total, so the count is a genuinely useful number
+                        // there; on a phone with 200 GB free it would just be noise.
+                        if (device.isTv && freeBytes > 0L) {
+                            append(" (~")
+                            append(freeBytes / estimatedBytes.coerceAtLeast(1L))
+                            append(" episodes)")
+                        }
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                if (tight) {
+                    Text(
+                        "Storage is nearly full. Downloading now may fail part-way or crowd out " +
+                            "other apps — free some space or pick a lower resolution first.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = onConfirm, enabled = confirmEnabled) {
-                Text("Download")
+                Text(if (tight) "Download anyway" else "Download")
             }
         },
         dismissButton = {
@@ -1600,7 +1642,17 @@ private fun SourceSelectors(
     downFocus: FocusRequester? = null,
 ) {
     val device = LocalAppDeviceProfile.current
-    val servers = remember(data.sourceOptions) { data.sourceOptions.map { it.provider }.distinct() }
+    var audioFilter by rememberSaveable { mutableStateOf(AudioFilter.ANY) }
+    var languageFilter by rememberSaveable { mutableStateOf<String?>(null) }
+    // A language that no longer appears (different episode, different servers) would otherwise
+    // silently filter everything away with no visible cause.
+    LaunchedEffect(data.knownLanguages) {
+        if (languageFilter != null && languageFilter !in data.knownLanguages) languageFilter = null
+    }
+    val filteredOptions = remember(data.sourceOptions, data.capabilities, audioFilter, languageFilter) {
+        filterSourceOptions(data.sourceOptions, data.capabilities, audioFilter, languageFilter)
+    }
+    val servers = remember(filteredOptions) { filteredOptions.map { it.provider }.distinct() }
     val categoriesByServer = remember(data.sourceOptions) {
         data.sourceOptions
             .groupBy { it.provider }
@@ -1685,6 +1737,10 @@ private fun SourceSelectors(
             MobileServerPickerContent(
                 data = data,
                 servers = servers,
+                audio = audioFilter,
+                onAudioChange = { audioFilter = it },
+                language = languageFilter,
+                onLanguageChange = { languageFilter = it },
                 onSelect = { server ->
                     showServerDialog = false
                     if (server != data.provider || server != data.preferredProvider) {
@@ -1738,16 +1794,16 @@ private fun SourceSelectors(
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = "Select preferred server",
+                            text = "Server for this episode",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
                             text = if (data.preferredProvider == "auto") {
-                                "Choose once; it will be tried first for every anime."
+                                "Applies to this episode only · ${servers.size} available"
                             } else {
-                                "Preferred: ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
+                                "This episode only · Settings pins ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
                             },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary
@@ -1766,6 +1822,15 @@ private fun SourceSelectors(
                             )
                         }
                     }
+
+                    SourceFilterRow(
+                        audio = audioFilter,
+                        onAudioChange = { audioFilter = it },
+                        languages = data.knownLanguages,
+                        language = languageFilter,
+                        onLanguageChange = { languageFilter = it },
+                        stillChecking = !languageFilterIsComplete(data.sourceOptions, data.capabilities),
+                    )
 
                     Column(
                         modifier = Modifier
@@ -1902,6 +1967,10 @@ private fun SourceSelectors(
 private fun MobileServerPickerContent(
     data: WatchData,
     servers: List<String>,
+    audio: AudioFilter,
+    onAudioChange: (AudioFilter) -> Unit,
+    language: String?,
+    onLanguageChange: (String?) -> Unit,
     onSelect: (String) -> Unit,
     onClose: () -> Unit,
 ) {
@@ -1919,15 +1988,15 @@ private fun MobileServerPickerContent(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                text = "Select preferred server",
+                text = "Server for this episode",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Black,
             )
             Text(
                 text = if (data.preferredProvider == "auto") {
-                    "Choose once; it will be tried first for every anime."
+                    "Applies to this episode only · ${servers.size} available"
                 } else {
-                    "Preferred: ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
+                    "This episode only · Settings pins ${ProviderCatalog.label(data.preferredProvider)} · ${servers.size} available"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary,
@@ -1949,6 +2018,15 @@ private fun MobileServerPickerContent(
                 )
             }
         }
+
+        SourceFilterRow(
+            audio = audio,
+            onAudioChange = onAudioChange,
+            languages = data.knownLanguages,
+            language = language,
+            onLanguageChange = onLanguageChange,
+            stillChecking = !languageFilterIsComplete(data.sourceOptions, data.capabilities),
+        )
 
         Column(
             modifier = Modifier
@@ -2252,11 +2330,3 @@ private fun BackButton(onBack: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-private fun Context.findActivity(): Activity? {
-    var ctx = this
-    while (ctx is ContextWrapper) {
-        if (ctx is Activity) return ctx
-        ctx = ctx.baseContext
-    }
-    return null
-}

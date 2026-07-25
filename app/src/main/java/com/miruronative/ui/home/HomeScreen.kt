@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -127,6 +128,8 @@ fun HomeScreen(
 ) {
     val state by vm.state.collectAsState()
     val isRefreshing by vm.isRefreshing.collectAsState()
+    val loadingMore by vm.loadingMore.collectAsState()
+    val exhausted by vm.exhausted.collectAsState()
     val history by LibraryStore.history.collectAsState()
     val device = LocalAppDeviceProfile.current
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -259,6 +262,8 @@ fun HomeScreen(
                     onSelectTab = vm::selectTab,
                     onLoadMoreTab = vm::loadMoreTab,
                     onLoadMoreTrending = vm::loadMoreTrending,
+                    loadingMore = loadingMore,
+                    exhausted = exhausted,
                     history = history,
                     onAnimeClick = onAnimeClick,
                     onWatchNow = onWatchNow,
@@ -317,6 +322,8 @@ private fun HomeContent(
     onSelectTab: (HomeTab) -> Unit,
     onLoadMoreTab: (HomeTab) -> Unit,
     onLoadMoreTrending: () -> Unit,
+    loadingMore: Set<HomeTab>,
+    exhausted: Set<HomeTab>,
     onGenreClick: (String?) -> Unit,
     history: List<HistoryEntry>,
     onAnimeClick: (Int) -> Unit,
@@ -405,25 +412,47 @@ private fun HomeContent(
                     }
                 }
                 item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                if (visibleLimit < fullTabList.size) {
-                                    visibleLimit += initialBatch
-                                } else {
-                                    onLoadMoreTab(selectedTab)
-                                    visibleLimit += initialBatch
-                                }
-                            },
-                            shape = RoundedCornerShape(20.dp),
-                            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                    val isLoadingMore = selectedTab in loadingMore
+                    // More rows already fetched than shown means the next tap is a free reveal;
+                    // otherwise it costs a page. Once AniList reports the section exhausted and
+                    // everything held is on screen, the button has nothing left to do.
+                    val canReveal = visibleLimit < fullTabList.size
+                    val canFetch = selectedTab !in exhausted
+                    if (canReveal || canFetch) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Text("Load More ${selectedTab.label} Anime", fontWeight = FontWeight.Bold)
+                            OutlinedButton(
+                                onClick = {
+                                    if (canReveal) {
+                                        visibleLimit += initialBatch
+                                    } else {
+                                        onLoadMoreTab(selectedTab)
+                                        // Anchor the window to what actually exists plus the
+                                        // incoming page, so arriving rows show without a second
+                                        // tap while a failed fetch cannot run the limit away.
+                                        visibleLimit = fullTabList.size + initialBatch
+                                    }
+                                },
+                                enabled = !isLoadingMore,
+                                shape = RoundedCornerShape(20.dp),
+                                modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                            ) {
+                                if (isLoadingMore) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                Text(
+                                    if (isLoadingMore) "Loading…" else "Load More ${selectedTab.label} Anime",
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
                         }
                     }
                 }
@@ -578,7 +607,7 @@ private fun HeroPager(
         LaunchedEffect(heroIds) {
             val loader = coil.Coil.imageLoader(context)
             items.take(3).forEach { media ->
-                val url = media.bannerImage ?: media.coverImage.best
+                val url = media.heroImage
                 if (url != null) {
                     loader.enqueue(
                         ImageRequest.Builder(context).data(url).crossfade(false).build(),
@@ -679,7 +708,7 @@ private fun HeroCard(
     val device = LocalAppDeviceProfile.current
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
-    val heroImage = media.bannerImage ?: media.coverImage.best
+    val heroImage = media.heroImage
     val heroImageRequest = remember(heroImage) {
         ImageRequest.Builder(context)
             .data(heroImage)

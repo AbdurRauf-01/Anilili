@@ -1835,6 +1835,17 @@ private class WebProgressBridge(
     }
 }
 
+/**
+ * Stylesheet the embed players get for their captions, wrapped in the script that installs it.
+ *
+ * The CSS goes through [asJsStringLiteral] rather than straight into the template: its attribute
+ * selectors contain double quotes, which silently turned the whole script into a syntax error —
+ * and `evaluateJavascript` swallows that, so the captions just quietly kept their own styling.
+ *
+ * Each surface gets exactly one offset mechanism. `::cue` only responds to `transform` (a cue's
+ * `bottom` is owned by the cue's own position setting), while the player-drawn caption containers
+ * are positioned elements that take `bottom`. Applying both to either one moved captions twice.
+ */
 internal fun applyCaptionStyleJs(style: CaptionStyle, controlsVisible: Boolean = false): String {
     val margin = if (controlsVisible) (style.bottomMarginPercent + 10).coerceAtMost(40) else style.bottomMarginPercent
     val bg = style.backgroundCssRgba()
@@ -1847,12 +1858,10 @@ internal fun applyCaptionStyleJs(style: CaptionStyle, controlsVisible: Boolean =
             color: $textHex !important;
             font-size: $size% !important;
             font-weight: $weight !important;
-            bottom: ${margin}% !important;
             transform: translateY(-${margin}vh) !important;
         }
         .vjs-text-track-display, .jw-captions, .art-subtitle, .dplayer-subtitle, .shaka-text-container, [class*="subtitle"], [class*="caption"] {
             bottom: ${margin}% !important;
-            margin-bottom: ${margin}vh !important;
         }
     """.trimIndent().replace("\n", " ")
     return """
@@ -1866,7 +1875,26 @@ internal fun applyCaptionStyleJs(style: CaptionStyle, controlsVisible: Boolean =
             style.id = id;
             parent.appendChild(style);
           }
-          style.textContent = "$css";
+          style.textContent = ${css.asJsStringLiteral()};
         })();
     """.trimIndent()
+}
+
+/** Quotes [this] as a JavaScript string literal, escaping everything that could end it early. */
+internal fun String.asJsStringLiteral(): String = buildString(length + 2) {
+    append('"')
+    this@asJsStringLiteral.forEach { ch ->
+        when (ch) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            ' ' -> append("\\u2028")
+            ' ' -> append("\\u2029")
+            // Keeps the payload inert if it is ever injected into an inline <script> block.
+            '<' -> append("\\u003C")
+            else -> append(ch)
+        }
+    }
+    append('"')
 }

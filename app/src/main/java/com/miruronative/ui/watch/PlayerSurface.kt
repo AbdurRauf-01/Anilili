@@ -257,6 +257,8 @@ fun PlayerSurface(
     var lastUserSeekRealtimeMs by remember(stream.url) { mutableLongStateOf(Long.MIN_VALUE) }
     var lastUserSeekTargetMs by remember(stream.url) { mutableLongStateOf(startPositionMs.coerceAtLeast(0L)) }
     var seekErrorRecoveryDone by remember(stream.url) { mutableStateOf(false) }
+    /** Set while the seek below is our own error recovery rather than the user's. */
+    var recoverySeekInFlight by remember(stream.url) { mutableStateOf(false) }
     var episodeDrawerExpanded by remember(stream.url) { mutableStateOf(false) }
     val nativeQualityStreams = remember(stream.url, qualityStreams) {
         (listOf(stream) + qualityStreams)
@@ -316,6 +318,32 @@ fun PlayerSurface(
                     DiagnosticsLog.event("PlayerSurface isPlaying=$isPlaying")
                 }
 
+                /**
+                 * Marks every user seek, not just the TV D-pad's.
+                 *
+                 * The seek marker used to be written only where remote presses are coalesced, so a
+                 * scrub on the phone's progress bar, a gesture skip, or an air-mouse drag on TV set
+                 * nothing at all. [shouldRecoverSeekError] then saw "no recent seek" and treated
+                 * the stale-segment error that normally follows a seek as a dead server — which is
+                 * why skipping ahead silently changed the server mid-episode.
+                 */
+                override fun onPositionDiscontinuity(
+                    oldPosition: Player.PositionInfo,
+                    newPosition: Player.PositionInfo,
+                    reason: Int,
+                ) {
+                    if (reason != Player.DISCONTINUITY_REASON_SEEK) return
+                    lastUserSeekTargetMs = newPosition.positionMs.coerceAtLeast(0L)
+                    lastUserSeekRealtimeMs = SystemClock.elapsedRealtime()
+                    // Our own recovery seek must not hand itself a fresh retry budget, or a
+                    // genuinely dead stream would retry forever instead of failing over.
+                    if (recoverySeekInFlight) {
+                        recoverySeekInFlight = false
+                    } else {
+                        seekErrorRecoveryDone = false
+                    }
+                }
+
                 override fun onPlayerError(error: PlaybackException) {
                     DiagnosticsLog.throwable("PlayerSurface player error code=${error.errorCodeName}", error)
                     val failedMediaId = activeController.currentMediaItem?.mediaId.orEmpty()
@@ -356,6 +384,7 @@ fun PlayerSurface(
                         )
                     ) {
                         seekErrorRecoveryDone = true
+                        recoverySeekInFlight = true
                         val resumeAt = lastUserSeekTargetMs.coerceAtLeast(0L)
                         activeController.prepare()
                         activeController.seekTo(resumeAt)

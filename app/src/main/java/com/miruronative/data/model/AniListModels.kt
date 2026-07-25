@@ -88,7 +88,19 @@ data class Media(
     val endDate: FuzzyDate? = null,
     val trailer: Trailer? = null,
     val relations: MediaRelationConnection = MediaRelationConnection(),
-)
+) {
+    /**
+     * Backdrop for the wide hero banners, best landscape source first.
+     *
+     * AniList has no dedicated key art field, so this is a preference order over what it does
+     * carry. `bannerImage` is the only purpose-built one (1900x400). The trailer frame is 16:9 and
+     * therefore still crops sensibly across a hero; it is lower resolution than the cover, but a
+     * soft landscape still behind a heavy scrim reads far better than a portrait poster sliced
+     * down to a letterbox strip. The cover is the last resort.
+     */
+    val heroImage: String? get() =
+        bannerImage ?: trailer?.thumbnail ?: coverImage.extraLarge ?: coverImage.best
+}
 
 /** Filters supported by AniList's Media catalog query. */
 data class DiscoverFilters(

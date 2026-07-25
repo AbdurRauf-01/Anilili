@@ -21,8 +21,6 @@ internal object JuicyCodesDecoder {
     private val SYMBOLS = listOf('`', '%', '-', '+', '*', '$', '!', '_', '^', '=')
     private val CALL = Regex("""_juicycodes\(([\s\S]*?)\);?""")
     private val STRING_PART = Regex("\"([^\"]*)\"")
-    // Android's ICU engine (unlike the JVM's) rejects a bare `}` — keep it escaped.
-    private val LABELS_BODY = Regex("\"labels\"\\s*:\\s*\\{([^}]*)\\}")
 
     data class EmbedConfig(
         val title: String?,
@@ -70,7 +68,7 @@ internal object JuicyCodesDecoder {
             .find(decodedJs)?.groupValues?.get(1)
             ?.replace("\\/", "/")
             ?: error("JuicyCodes config carries no HLS url")
-        val labelsBody = LABELS_BODY.find(decodedJs)?.groupValues?.get(1).orEmpty()
+        val labelsBody = labelsBody(decodedJs)
         val labels = Regex("\"(\\d+)\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"")
             .findAll(labelsBody)
             .associate { it.groupValues[1] to it.groupValues[2] }
@@ -81,6 +79,30 @@ internal object JuicyCodesDecoder {
             thumbnailsVtt = Regex("\"kind\"\\s*:\\s*\"thumbnails\"\\s*,\\s*\"file\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"")
                 .find(decodedJs)?.groupValues?.get(1)?.replace("\\/", "/"),
         )
+    }
+
+    /**
+     * The body of the `"labels": { … }` object, found by scanning rather than by regex.
+     *
+     * The pattern this replaces — `"labels"\s*:\s*\{([^}]*)\}` — compiles on the JVM but threw
+     * `PatternSyntaxException` on device (verified on a Galaxy S25). Because it lived in a field
+     * initialiser, the whole object failed to load and every decode after it died with
+     * `NoClassDefFoundError`, so RareAnimes could never resolve a stream. Unit tests run against
+     * the JVM's regex engine and cannot catch this class of divergence at all.
+     *
+     * Brace-matching here is plain index arithmetic, which sidesteps the question entirely. Note
+     * that escaped braces are not universally broken on Android — `AniBdProvider.trackSubtitles`
+     * relies on them in production — so treat this as one pattern that Android rejected, not a
+     * general rule.
+     */
+    private fun labelsBody(js: String): String {
+        val key = js.indexOf("\"labels\"")
+        if (key < 0) return ""
+        val open = js.indexOf('{', key)
+        if (open < 0) return ""
+        val close = js.indexOf('}', open)
+        if (close < 0) return ""
+        return js.substring(open + 1, close)
     }
 
     private fun jsString(js: String, key: String): String? =

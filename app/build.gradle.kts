@@ -24,8 +24,8 @@ android {
         // Fire OS 5 devices (including the 1st/2nd-gen Fire TV Sticks) report API 22.
         minSdk = 22
         targetSdk = 36
-        versionCode = 47
-        versionName = "0.1.46"
+        versionCode = 48
+        versionName = "0.1.47"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -72,6 +72,13 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    testOptions {
+        unitTests {
+            // Production code logs through DiagnosticsLog, which reads SystemClock. Without this,
+            // any unit test that walks a logging path dies on "not mocked" instead of asserting.
+            isReturnDefaultValues = true
+        }
     }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"

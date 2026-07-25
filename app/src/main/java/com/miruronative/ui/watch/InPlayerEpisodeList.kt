@@ -63,6 +63,7 @@ import coil.compose.AsyncImage
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.components.EpisodeBlockPicker
+import com.miruronative.ui.components.EqualizerWaveIndicator
 import com.miruronative.ui.components.FastScrollbar
 import com.miruronative.ui.components.blockIndexContaining
 import com.miruronative.ui.components.episodeBlocks
@@ -346,8 +347,8 @@ private fun InPlayerEpisodeItemRow(
                         .background(Color.Black.copy(alpha = 0.55f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    com.miruronative.ui.components.EqualizerWaveIndicator(
-                        color = Color(0xFFC4B5FD),
+                    EqualizerWaveIndicator(
+                        color = MaterialTheme.colorScheme.primary,
                         barCount = 4,
                         barWidth = 3.5.dp,
                         maxHeight = 18.dp,
@@ -369,8 +370,8 @@ private fun InPlayerEpisodeItemRow(
                 )
                 if (isCurrent) {
                     Spacer(Modifier.width(6.dp))
-                    com.miruronative.ui.components.EqualizerWaveIndicator(
-                        color = Color(0xFFC4B5FD),
+                    EqualizerWaveIndicator(
+                        color = MaterialTheme.colorScheme.primary,
                         barCount = 3,
                         barWidth = 2.5.dp,
                         maxHeight = 12.dp,

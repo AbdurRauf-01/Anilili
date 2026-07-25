@@ -12,6 +12,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.miruronative.data.AppGraph
 import com.miruronative.diagnostics.DiagnosticsLog
 import java.util.LinkedHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -88,7 +89,7 @@ class AppCache(
     ).fallbackToDestructiveMigration(true).build().cacheDao()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val keyLocks = Array(64) { Mutex() }
-    private val memoryLimit = if (com.miruronative.data.AppGraph.isTv) 40 else MEMORY_ENTRIES
+    private val memoryLimit = if (AppGraph.isTv) 40 else MEMORY_ENTRIES
     private val memory = object : LinkedHashMap<String, CacheEntry>(memoryLimit, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>?): Boolean =
             size > memoryLimit
@@ -100,6 +101,13 @@ class AppCache(
         ttlMs: Long,
         staleForMs: Long = DEFAULT_STALE_MS,
         forceRefresh: Boolean = false,
+        /**
+         * Gate on storing a freshly fetched value. A result assembled from partly-failed upstreams
+         * is still usable right now but must not be written as if it were authoritative — see
+         * [MiruroRepository.anivexaEpisodes], where a degraded network otherwise pinned a thin
+         * catalog for hours and the only way out was clearing app data.
+         */
+        cacheIf: (T) -> Boolean = { true },
         fetch: suspend () -> T,
     ): T {
         val now = System.currentTimeMillis()
@@ -113,7 +121,7 @@ class AppCache(
             touch(cached, now)
             scope.launch {
                 try {
-                    refresh(key, serializer, ttlMs, false, fetch)
+                    refresh(key, serializer, ttlMs, false, cacheIf, fetch)
                 } catch (_: Exception) {
                     // The stale value remains available until its safety window closes.
                 }
@@ -121,7 +129,7 @@ class AppCache(
             return decoded
         }
         return try {
-            refresh(key, serializer, ttlMs, forceRefresh, fetch)
+            refresh(key, serializer, ttlMs, forceRefresh, cacheIf, fetch)
         } catch (e: Exception) {
             // Last-known-good fallback: an expired entry beats an error screen when the
             // network or an upstream (e.g. Cloudflare in front of AniList) is refusing us.
@@ -163,6 +171,7 @@ class AppCache(
         serializer: KSerializer<T>,
         ttlMs: Long,
         forceRefresh: Boolean,
+        cacheIf: (T) -> Boolean,
         fetch: suspend () -> T,
     ): T {
         val lock = keyLocks[(key.hashCode() and Int.MAX_VALUE) % keyLocks.size]
@@ -174,6 +183,10 @@ class AppCache(
                 }
 
                 val value = fetch()
+                if (!cacheIf(value)) {
+                    DiagnosticsLog.event("AppCache skipped storing degraded value key=$key")
+                    return@withLock value
+                }
                 val payload = CachePayloadCodec.encode(json.encodeToString(serializer, value))
                 val entry = CacheEntry(
                     key = key,

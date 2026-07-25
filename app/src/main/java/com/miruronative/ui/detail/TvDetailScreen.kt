@@ -205,7 +205,7 @@ private fun TvDetailHero(
     primaryActionFocusRequester: FocusRequester,
     onPrimaryFocusAcquired: () -> Unit,
 ) {
-    val image = info.bannerImage ?: info.coverImage.extraLarge ?: info.coverImage.best
+    val image = info.heroImage
     val description = remember(info.description) {
         info.description
             ?.replace(Regex("<[^>]*>"), "")
@@ -227,7 +227,9 @@ private fun TvDetailHero(
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
-            alignment = Alignment.CenterEnd,
+            // Matches the home hero: CenterEnd showed a banner's empty right edge, and the middle
+            // of a portrait cover when no banner exists. See TvHomeScreen's hero for the details.
+            alignment = Alignment.TopCenter,
         )
         Box(
             Modifier.fillMaxSize().background(

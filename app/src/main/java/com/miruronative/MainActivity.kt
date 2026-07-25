@@ -73,6 +73,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -600,6 +601,9 @@ private fun MiruroRoot(
     }
 }
 
+/** Frames to keep retrying the rail's initial focus on slow TV boxes before giving up. */
+private const val TV_FOCUS_ATTEMPTS = 10
+
 private val tvPrimaryTabs = Tab.entries.filterNot { it == Tab.SETTINGS }
 private val TvClockFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
@@ -655,12 +659,16 @@ private fun AppTvTopNavigation(
                 modifier = Modifier.size(42.dp).clip(CircleShape),
             )
             Text(
-                text = stringResource(R.string.app_name).uppercase(),
+                // The wordmark is capital-A "Anilili" everywhere else — launcher label, phone
+                // rail, APK filenames — so the TV header uses the brand as written, not shouted.
+                // Sized to stand level with the 42.dp mark beside it; tracking eases off as the
+                // type grows, since 1.5sp of it reads as a gap at this size.
+                text = stringResource(R.string.app_name),
                 color = ComposeColor.White,
                 fontWeight = FontWeight.Black,
-                fontSize = 16.sp,
-                letterSpacing = 1.5.sp,
-                modifier = Modifier.padding(start = 10.dp),
+                fontSize = 28.sp,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.padding(start = 12.dp),
             )
         }
 
@@ -840,10 +848,20 @@ private fun AppNavigationRail(
             if (tab == Tab.SEARCH) searchRailFocusRequester else FocusRequester()
         }
     }
+    // Slow Fire TV boxes (AFTTIFF43) can run this before the rail's focus targets are attached,
+    // and FocusRequester.requestFocus() throws outright when its node is not there yet. Retry
+    // across a few frames instead of swallowing the failure: a silent catch left the rail with
+    // nothing focused at all, which on a D-pad means the user cannot move.
     LaunchedEffect(currentRoute, device.isTv) {
-        if (device.isTv) {
-            Tab.entries.firstOrNull { it.route == currentRoute }
-                ?.let { tab -> runCatching { focusRequesters.getValue(tab).requestFocus() } }
+        if (!device.isTv) return@LaunchedEffect
+        val tab = Tab.entries.firstOrNull { it.route == currentRoute } ?: return@LaunchedEffect
+        val requester = focusRequesters.getValue(tab)
+        repeat(TV_FOCUS_ATTEMPTS) { attempt ->
+            if (runCatching { requester.requestFocus() }.isSuccess) return@LaunchedEffect
+            withFrameNanos {}
+            if (attempt == TV_FOCUS_ATTEMPTS - 1) {
+                DiagnosticsLog.event("Navigation rail focus never attached route=$currentRoute")
+            }
         }
     }
     NavigationRail(

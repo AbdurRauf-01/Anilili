@@ -33,6 +33,7 @@ import com.miruronative.data.remote.MediaListProgressUpdate
 import com.miruronative.data.remote.PipeClient
 import com.miruronative.data.remote.planMediaListProgressUpdate
 import com.miruronative.data.settings.SettingsStore
+import com.miruronative.data.settings.DEFAULT_PREFERRED_PROVIDER
 import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -52,14 +53,33 @@ import kotlinx.serialization.builtins.serializer
  * Keeps fallback attempts spread across independent backends. Providers from one backend often
  * fail together, so exhausting the attempt budget on adjacent aliases defeats fallback entirely.
  */
-internal fun providerAttemptOrder(preferred: String, providerNames: List<String>): List<String> {
-    val available = (listOf(preferred) + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
+/**
+ * The order servers are tried in for one episode.
+ *
+ * [preferred] goes first, then any [fallbacks] the user picked in Settings, and only then the
+ * catalog's own alternating order. Entries that are blank, "auto", duplicated, or equal to
+ * [preferred] are dropped, so a half-filled pair of fallback slots behaves like none at all.
+ */
+internal fun providerAttemptOrder(
+    preferred: String,
+    providerNames: List<String>,
+    fallbacks: List<String> = emptyList(),
+): List<String> {
+    val chosen = buildList {
+        add(preferred)
+        fallbacks.forEach { fallback ->
+            val name = fallback.trim().lowercase()
+            if (name.isNotBlank() && name != DEFAULT_PREFERRED_PROVIDER && name !in this) add(name)
+        }
+    }
+    val available = (chosen + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
     val preferredSource = ProviderCatalog.sourceOf(preferred)
-    val sameSource = available.filter { it != preferred && ProviderCatalog.sourceOf(it) == preferredSource }
-    val otherSource = available.filter { ProviderCatalog.sourceOf(it) != preferredSource }
+    val rest = available.filterNot { it in chosen }
+    val sameSource = rest.filter { ProviderCatalog.sourceOf(it) == preferredSource }
+    val otherSource = rest.filter { ProviderCatalog.sourceOf(it) != preferredSource }
 
     return buildList {
-        add(preferred)
+        addAll(chosen)
         repeat(maxOf(sameSource.size, otherSource.size)) { index ->
             otherSource.getOrNull(index)?.let(::add)
             sameSource.getOrNull(index)?.let(::add)
@@ -577,11 +597,17 @@ class MiruroRepository(
         // Fetched here (outside the episodes cache lock — the striped mutexes are not reentrant) so
         // the Anivexa catalog reuses the shared AniList Media instead of re-requesting it itself.
         val seed = runCatching { animeInfo(anilistId) }.getOrNull()
+        val expected = ProviderCatalog.anivexaProvidersFor(hideAdult).size
         return cache.getOrFetch(
             key = "episodes:v4:anivexa:$anilistId",
             serializer = EpisodesResult.serializer(),
             ttlMs = EPISODES_TTL,
             forceRefresh = force,
+            // A catalog assembled while the network was struggling is missing the providers that
+            // timed out, and caching it pinned that thin list for two hours — users reported "no
+            // sources" on titles with plenty, and clearing app data was the only way out. Use the
+            // result now, but only remember it if enough of the catalog actually answered.
+            cacheIf = { it.providers.size >= (expected * MIN_CATALOG_COVERAGE).toInt() },
         ) {
             anivexa.getEpisodes(anilistId, seed).also {
                 check(!it.isEmpty) { "Anivexa returned no episode providers" }
@@ -693,7 +719,12 @@ class MiruroRepository(
         excludedProviders: Set<String> = emptySet(),
         maxAttempts: Int = 5,
     ): SourceResolution {
-        val ordered = providerAttemptOrder(preferred, episodes.providerNames)
+        val ordered = providerAttemptOrder(
+            preferred = preferred,
+            providerNames = episodes.providerNames,
+            // Everything the user ranked behind their first choice, in their order.
+            fallbacks = SettingsStore.serverPriority.value.drop(1),
+        )
         val candidates = ordered.mapNotNull { name ->
             val provider = episodes.provider(name) ?: return@mapNotNull null
             val episode = provider.episodes(category).firstOrNull { it.number == number }
@@ -784,6 +815,13 @@ class MiruroRepository(
         const val AIRING_TTL = 30L * 60 * 1000
         const val COLLECTION_TTL = 4L * 60 * 60 * 1000
         const val EPISODES_TTL = 2L * 60 * 60 * 1000
+
+        /**
+         * Fraction of the Anivexa catalog that must answer before the result is worth caching.
+         * Half is deliberately lenient: providers genuinely lack titles all the time, and the
+         * target is the degraded-network case where nearly everything times out at once.
+         */
+        const val MIN_CATALOG_COVERAGE = 0.5
         const val FILLER_FETCH_TIMEOUT_MS = 3_500L
         const val FAST_CATALOG_PROVIDER_TIMEOUT_MS = 6_000L
         const val PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS = 8_000L

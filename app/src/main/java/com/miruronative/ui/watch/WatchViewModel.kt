@@ -59,9 +59,18 @@ data class WatchData(
     val isResolving: Boolean = false,
     /** The fast Miruro sources are shown; the slower Anivexa servers are still loading in. */
     val isLoadingMoreSources: Boolean = false,
+    /** Track languages discovered per server/audio pair, filled in as sources are validated. */
+    val capabilities: Map<Pair<String, Category>, SourceCapabilities> = emptyMap(),
     val notice: String? = null,
 ) {
     val current: EpisodeItem get() = episodes[currentIndex]
+
+    fun capabilitiesOf(option: WatchSourceOption): SourceCapabilities =
+        capabilities[option.provider to option.category] ?: SourceCapabilities()
+
+    /** Every language seen so far across all options, for the picker's filter row. */
+    val knownLanguages: List<String>
+        get() = capabilities.values.flatMap { it.languages }.distinct().sorted()
     val hasNext: Boolean get() = currentIndex < episodes.lastIndex
     val hasPrev: Boolean get() = currentIndex > 0
 }
@@ -72,6 +81,26 @@ data class WatchSourceOption(
     val hasCurrentEpisode: Boolean,
     val episodeCount: Int,
 )
+
+/**
+ * What a server/audio pair actually turned out to offer, learned when its sources were resolved.
+ *
+ * The catalog only knows sub vs dub. Which spoken language a dub is in, and which subtitle tracks
+ * ride along, are inside the resolved [com.miruronative.data.model.SourcesResult] — so they are
+ * only knowable after a resolve. The source-validation pass already performs exactly that resolve
+ * for every candidate and used to keep nothing but a boolean; this is that discarded detail.
+ *
+ * [known] separates "we checked and it has no subtitle tracks" (common — plenty of servers ship
+ * hardsubbed video) from "we have not checked yet", so the picker never claims a language is
+ * missing while it is still looking.
+ */
+data class SourceCapabilities(
+    val audioLanguages: Set<String> = emptySet(),
+    val subtitleLanguages: Set<String> = emptySet(),
+    val known: Boolean = false,
+) {
+    val languages: Set<String> get() = audioLanguages + subtitleLanguages
+}
 
 private data class EpisodeSourceKey(
     val episode: Double,
@@ -107,6 +136,16 @@ class WatchViewModel : ViewModel() {
     private var failedProviders = mutableSetOf<String>()
     private val unavailableSources = mutableSetOf<EpisodeSourceKey>()
     private val confirmedSources = mutableSetOf<EpisodeSourceKey>()
+
+    /**
+     * What each server/audio pair offers, keyed by provider+category and *not* by episode.
+     *
+     * Sampling one episode is enough: a provider's track lineup for a series does not change
+     * between its episodes (checked live — AniBD returned exactly `[en]` for Dandadan episodes 1,
+     * 2 and 5). Keying by episode would multiply the resolves by the episode count for data that
+     * comes back identical every time.
+     */
+    private val sourceCapabilities = mutableMapOf<Pair<String, Category>, SourceCapabilities>()
     private val failedStreamUrls = mutableSetOf<String>()
     /** Konoha's episode titles and stills, kept so every spine rebuild carries them. */
     private var episodeMeta: List<KonohaEpisode> = emptyList()
@@ -292,6 +331,7 @@ class WatchViewModel : ViewModel() {
                     episodes = spine,
                     currentIndex = index,
                     sourceOptions = sourceOptions(number),
+                        capabilities = sourceCapabilities.toMap(),
                 ),
             )
             launchSourceValidation(number)
@@ -327,6 +367,7 @@ class WatchViewModel : ViewModel() {
                     episodes = spine,
                     currentIndex = index,
                     sourceOptions = sourceOptions(number),
+                        capabilities = sourceCapabilities.toMap(),
                     isLoadingMoreSources = false,
                 ),
             )
@@ -424,6 +465,7 @@ class WatchViewModel : ViewModel() {
                 UiState.Success(
                     it.copy(
                         sourceOptions = sourceOptions(number),
+                        capabilities = sourceCapabilities.toMap(),
                         isResolving = false,
                         notice = message,
                     ),
@@ -482,6 +524,7 @@ class WatchViewModel : ViewModel() {
                 provider = resolved.provider,
                 category = category,
                 sourceOptions = sourceOptions(number),
+                        capabilities = sourceCapabilities.toMap(),
                 anilistId = anilistId,
                 sources = sources,
                 chosenStream = chosen,
@@ -502,9 +545,16 @@ class WatchViewModel : ViewModel() {
         launchSourceValidation(number)
     }
 
+    /**
+     * Switches the server for the episode on screen only.
+     *
+     * Picking a server here used to also pin it as the global preference, so reaching for a
+     * working source on one awkward episode silently re-pointed every future title at it. The
+     * lasting choice now lives in Settings ▸ Servers, where it can be ranked and seen.
+     */
     fun changeSource(providerName: String, categoryApi: String) {
         DiagnosticsLog.event("Watch changeSource requested provider=$providerName category=$categoryApi")
-        switchSource(providerName, categoryApi, rememberProvider = true)
+        switchSource(providerName, categoryApi, rememberProvider = false)
     }
 
     fun changeCategory(categoryApi: String) {
@@ -738,6 +788,30 @@ class WatchViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Files away the track languages a resolve turned up.
+     *
+     * Audio labels are provider-authored free text ("Hindi", "English Dub", "sub"), so they are
+     * normalised through [normalizeLanguage], and the placeholder labels that just restate the
+     * category are dropped — "sub" is not a language.
+     */
+    private fun recordCapabilities(option: WatchSourceOption, sources: SourcesResult) {
+        val audio = sources.streams.mapNotNull { it.audio }
+            .mapNotNull(::normalizeLanguage)
+            .toSet()
+        val subtitles = sources.subtitles
+            .mapNotNull { normalizeLanguage(it.language.ifBlank { it.label }) }
+            .toSet()
+        sourceCapabilities[option.provider to option.category] = SourceCapabilities(
+            audioLanguages = audio,
+            subtitleLanguages = subtitles,
+            known = true,
+        )
+    }
+
+    fun capabilitiesFor(provider: String, category: Category): SourceCapabilities =
+        sourceCapabilities[provider to category] ?: SourceCapabilities()
+
     private fun sourceOptions(number: Double): List<WatchSourceOption> =
         visibleSourceOptions(
             candidates = availableSourceOptions(mergedEpisodes, number),
@@ -796,7 +870,11 @@ class WatchViewModel : ViewModel() {
                                 it,
                             )
                         }.getOrNull()
-                        option to (resolution?.resolved?.provider == option.provider)
+                        val resolved = resolution?.resolved?.takeIf { it.provider == option.provider }
+                        // Keep what the resolve told us about the tracks, not just whether it
+                        // worked. This costs nothing extra — the request already happened.
+                        resolved?.let { recordCapabilities(option, it.sources) }
+                        option to (resolved != null)
                     }
                 }.awaitAll()
 
@@ -816,6 +894,7 @@ class WatchViewModel : ViewModel() {
                 _state.value = UiState.Success(
                     data.copy(
                         sourceOptions = sourceOptions(number),
+                        capabilities = sourceCapabilities.toMap(),
                         isLoadingMoreSources = !mergedIncludesAnivexa || hasMore,
                     ),
                 )

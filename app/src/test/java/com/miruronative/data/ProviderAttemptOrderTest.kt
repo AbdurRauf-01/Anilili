@@ -44,4 +44,37 @@ class ProviderAttemptOrderTest {
             providerAttemptOrder("anikoto", providers).take(5),
         )
     }
+
+    @Test
+    fun `settings fallbacks are tried straight after the preferred server`() {
+        assertEquals(
+            listOf("bonk", "animekai", "ally"),
+            providerAttemptOrder("bonk", providers, listOf("animekai", "ally")).take(3),
+        )
+    }
+
+    @Test
+    fun `empty, auto, duplicate and self-referencing fallback slots are ignored`() {
+        val plain = providerAttemptOrder("bonk", providers)
+        // "auto" is what an unset slot stores, so a half-filled pair behaves like none at all.
+        assertEquals(plain, providerAttemptOrder("bonk", providers, listOf("auto", "auto")))
+        assertEquals(plain, providerAttemptOrder("bonk", providers, listOf("", "  ")))
+        // Naming the preferred server again must not push a real fallback out of its slot.
+        assertEquals(
+            listOf("bonk", "ally"),
+            providerAttemptOrder("bonk", providers, listOf("bonk", "ally")).take(2),
+        )
+        assertEquals(
+            listOf("bonk", "ally"),
+            providerAttemptOrder("bonk", providers, listOf("ally", "ally")).take(2),
+        )
+    }
+
+    @Test
+    fun `every provider still appears exactly once when fallbacks are set`() {
+        val order = providerAttemptOrder("bonk", providers, listOf("animekai", "ally"))
+        assertEquals(providers.size, order.size)
+        assertEquals(providers.toSet(), order.toSet())
+        assertEquals(order.size, order.distinct().size)
+    }
 }

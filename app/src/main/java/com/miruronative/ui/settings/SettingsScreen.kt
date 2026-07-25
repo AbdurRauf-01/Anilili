@@ -9,6 +9,7 @@ import android.os.Build
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.res.painterResource
 import com.miruronative.R
@@ -22,11 +23,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
@@ -50,9 +53,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -66,9 +72,12 @@ import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.library.MalExportFile
 import com.miruronative.data.reminder.AutomaticReleaseManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
+import com.miruronative.data.ProviderCatalog
+import com.miruronative.data.settings.DEFAULT_PREFERRED_PROVIDER
 import com.miruronative.data.settings.DefaultQuality
 import com.miruronative.data.settings.DownloadDestination
 import com.miruronative.data.settings.DownloadQuality
+import com.miruronative.data.settings.MAX_SERVER_PRIORITY
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.settings.MenuLanguage
 import com.miruronative.data.update.UpdateManager
@@ -105,6 +114,7 @@ fun SettingsScreen(
     val autoSync by SettingsStore.autoSyncAniList.collectAsState()
     val preferDub by SettingsStore.preferDub.collectAsState()
     val defaultQuality by SettingsStore.defaultQuality.collectAsState()
+    val serverPriority by SettingsStore.serverPriority.collectAsState()
     val downloadQuality by SettingsStore.downloadQuality.collectAsState()
     val downloadDestination by SettingsStore.downloadDestination.collectAsState()
     val releaseNotifications by SettingsStore.releaseNotifications.collectAsState()
@@ -127,6 +137,13 @@ fun SettingsScreen(
     var cacheUsage by remember { mutableStateOf<Long?>(null) }
     var cacheClearing by remember { mutableStateOf(false) }
     var cacheMessage by remember { mutableStateOf<String?>(null) }
+    // Only the first group opens by default: the page is long enough that showing every row at
+    // once is what made it hard to scan, and on a remote it is a lot of rows to travel past.
+    var expandedSections by rememberSaveable { mutableStateOf(listOf("Playback")) }
+    fun toggleSection(name: String) {
+        expandedSections =
+            if (name in expandedSections) expandedSections - name else expandedSections + name
+    }
 
     LaunchedEffect(token, malLoggedIn) { vm.loadIfLoggedIn() }
     LaunchedEffect(Unit) {
@@ -277,7 +294,11 @@ fun SettingsScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            item { SettingsSectionTitle("Playback") }
+            settingsSection(
+                title = "Playback",
+                expanded = "Playback" in expandedSections,
+                onToggle = { toggleSection("Playback") },
+            ) {
             item { SettingSwitch("Autoplay next episode", "Continue automatically", autoplay, SettingsStore::setAutoplay) }
             item { SettingSwitch("Auto-skip intro and outro", "Use provider skip times when available", autoSkip, SettingsStore::setAutoSkipIntroOutro) }
             item {
@@ -303,10 +324,14 @@ fun SettingsScreen(
                     onClick = { captionAppearanceVisible = true },
                 )
             }
-            item { SectionDivider() }
+            }
 
             if (device.isTv) {
-                item { SettingsSectionTitle("Accessibility") }
+            settingsSection(
+                title = "Accessibility",
+                expanded = "Accessibility" in expandedSections,
+                onToggle = { toggleSection("Accessibility") },
+            ) {
                 item {
                     SettingsAction(
                         title = "Spoken feedback: ${if (screenReaderActive) "On" else "Off"}",
@@ -323,10 +348,27 @@ fun SettingsScreen(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                     )
                 }
-                item { SectionDivider() }
+            }
             }
 
-            item { SettingsSectionTitle("Downloads") }
+            settingsSection(
+                title = "Servers",
+                expanded = "Servers" in expandedSections,
+                onToggle = { toggleSection("Servers") },
+            ) {
+            item {
+                ServerPrioritySetting(
+                    priority = serverPriority,
+                    onChange = SettingsStore::setServerPriority,
+                )
+            }
+            }
+
+            settingsSection(
+                title = "Downloads",
+                expanded = "Downloads" in expandedSections,
+                onToggle = { toggleSection("Downloads") },
+            ) {
             item {
                 DownloadQualitySetting(
                     selected = downloadQuality,
@@ -340,9 +382,13 @@ fun SettingsScreen(
                     onSelect = SettingsStore::setDownloadDestination,
                 )
             }
-            item { SectionDivider() }
+            }
 
-            item { SettingsSectionTitle("Content") }
+            settingsSection(
+                title = "Content",
+                expanded = "Content" in expandedSections,
+                onToggle = { toggleSection("Content") },
+            ) {
             item {
                 SettingSwitch(
                     "Hide adult content",
@@ -351,9 +397,13 @@ fun SettingsScreen(
                     SettingsStore::setHideAdultContent,
                 )
             }
-            item { SectionDivider() }
+            }
 
-            item { SettingsSectionTitle("List sync (AniList / MyAnimeList)") }
+            settingsSection(
+                title = "List sync (AniList / MyAnimeList)",
+                expanded = "List sync (AniList / MyAnimeList)" in expandedSections,
+                onToggle = { toggleSection("List sync (AniList / MyAnimeList)") },
+            ) {
             item { SettingSwitch("Sync episode progress", "Update watched episodes while playing", autoSync, SettingsStore::setAutoSyncAniList) }
             item {
                 SettingSwitch(
@@ -363,9 +413,13 @@ fun SettingsScreen(
                     ::setWatchlistSync,
                 )
             }
-            item { SectionDivider() }
+            }
 
-            item { SettingsSectionTitle("Notifications") }
+            settingsSection(
+                title = "Notifications",
+                expanded = "Notifications" in expandedSections,
+                onToggle = { toggleSection("Notifications") },
+            ) {
             item {
                 SettingSwitch(
                     "Notification alerts",
@@ -374,9 +428,13 @@ fun SettingsScreen(
                     ::setReleaseNotifications,
                 )
             }
-            item { SectionDivider() }
+            }
 
-            item { SettingsSectionTitle("Data") }
+            settingsSection(
+                title = "Data",
+                expanded = "Data" in expandedSections,
+                onToggle = { toggleSection("Data") },
+            ) {
             item {
                 SettingsAction(
                     title = if (malExportBusy) "Preparing MyAnimeList export..." else "Export MyAnimeList XML",
@@ -448,9 +506,13 @@ fun SettingsScreen(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
-            item { SectionDivider() }
+            }
 
-            item { SettingsSectionTitle(if (menuLanguage.usesSpanish()) "Aplicación" else "App") }
+            settingsSection(
+                title = (if (menuLanguage.usesSpanish()) "Aplicación" else "App"),
+                expanded = (if (menuLanguage.usesSpanish()) "Aplicación" else "App") in expandedSections,
+                onToggle = { toggleSection((if (menuLanguage.usesSpanish()) "Aplicación" else "App")) },
+            ) {
             item {
                 MenuLanguageSetting(
                     selected = menuLanguage,
@@ -522,7 +584,13 @@ fun SettingsScreen(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
-            item { SectionDivider() }
+            }
+
+            settingsSection(
+                title = "About",
+                expanded = "About" in expandedSections,
+                onToggle = { toggleSection("About") },
+            ) {
             item {
                 SettingsAction(
                     title = "Share Anilili with friends",
@@ -556,6 +624,7 @@ fun SettingsScreen(
                         }
                     },
                 )
+            }
             }
         }
     }
@@ -591,6 +660,80 @@ private fun shareAnilili(context: Context, openWebsite: Boolean) {
         context.startActivity(Intent.createChooser(send, "Share Anilili"))
     }.onFailure {
         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, website)) }
+    }
+}
+
+/**
+ * Server priority as a single ranked picker, the way a photo grid numbers its selection.
+ *
+ * Tapping an unpicked server appends it and it takes the next number; tapping a picked one removes
+ * it and everything behind closes the gap. Three separate "preferred / first fallback / second
+ * fallback" dropdowns expressed the same thing but let a user leave a hole in the middle, and gave
+ * no single place to read the resulting order off.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ServerPrioritySetting(
+    priority: List<String>,
+    onChange: (List<String>) -> Unit,
+) {
+    val hideAdult by SettingsStore.hideAdultContent.collectAsState()
+    val servers = remember(hideAdult) { ProviderCatalog.selectableProviders(hideAdult) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+        Text(
+            "Server priority",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            if (priority.isEmpty()) {
+                "Pick up to $MAX_SERVER_PRIORITY servers in the order you want them tried. " +
+                    "With none picked, the built-in order is used."
+            } else {
+                priority.mapIndexed { index, server ->
+                    "${index + 1}. ${ProviderCatalog.label(server)}"
+                }.joinToString("   ")
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(top = 8.dp),
+        ) {
+            servers.forEach { server ->
+                val rank = priority.indexOf(server)
+                val picked = rank >= 0
+                val full = priority.size >= MAX_SERVER_PRIORITY
+                FilterChip(
+                    selected = picked,
+                    // A full list still lets you tap a picked chip, so the only way out is not
+                    // "clear everything" — you drop the one you no longer want.
+                    enabled = picked || !full,
+                    onClick = {
+                        onChange(
+                            if (picked) priority.filterNot { it == server } else priority + server,
+                        )
+                    },
+                    label = { Text(ProviderCatalog.label(server)) },
+                    leadingIcon = if (picked) {
+                        { Text("${rank + 1}", fontWeight = FontWeight.Bold) }
+                    } else {
+                        null
+                    },
+                    modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                )
+            }
+        }
+        if (priority.isNotEmpty()) {
+            TextButton(
+                onClick = { onChange(emptyList()) },
+                modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+            ) {
+                Text("Clear")
+            }
+        }
     }
 }
 
@@ -751,6 +894,54 @@ private fun SettingsSectionTitle(title: String) {
         fontWeight = FontWeight.Black,
         modifier = Modifier.padding(start = 12.dp, top = 18.dp, bottom = 6.dp),
     )
+}
+
+/**
+ * A collapsible settings group: a focusable header that toggles, and rows emitted only while open.
+ *
+ * The rows stay [LazyListScope] items rather than moving inside a Column, so a long section still
+ * only composes what is on screen. Collapsing simply stops emitting them, which also means a
+ * D-pad user never tabs through rows they cannot see.
+ */
+private fun LazyListScope.settingsSection(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: LazyListScope.() -> Unit,
+) {
+    item(key = "section-$title") { SettingsSectionHeader(title, expanded, onToggle) }
+    if (expanded) content()
+    item(key = "divider-$title") { SectionDivider() }
+}
+
+@Composable
+private fun SettingsSectionHeader(title: String, expanded: Boolean, onToggle: () -> Unit) {
+    val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "section-chevron")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            // No scale on focus: these rows span the full width, and TV's 6% zoom pushed the
+            // title off the left edge and the chevron off the right. The border alone is a clear
+            // enough affordance for a row this size.
+            .focusHighlight(RoundedCornerShape(10.dp), focusedScale = 1f)
+            .clickable(onClick = onToggle)
+            .padding(start = 12.dp, end = 12.dp, top = 14.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            Icons.Default.ExpandMore,
+            contentDescription = if (expanded) "Collapse $title" else "Expand $title",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.rotate(rotation),
+        )
+    }
 }
 
 @Composable

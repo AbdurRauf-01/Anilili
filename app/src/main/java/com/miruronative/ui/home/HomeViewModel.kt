@@ -44,10 +44,30 @@ class HomeViewModel : ViewModel() {
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing = _isRefreshing.asStateFlow()
 
-    private val tabPages = mutableMapOf<HomeTab, Int>()
-    private val tabLoading = mutableMapOf<HomeTab, Boolean>()
-    private var trendingPage = 1
-    private var trendingLoading = false
+    /** Per-section paging cursor. Rebuilt on every load so a refresh starts from page 1 again. */
+    private class Paging {
+        var page = 1
+        var loading = false
+        var hasMore = true
+    }
+
+    private val tabPaging = HomeTab.entries.associateWith { Paging() }
+    private val trendingPaging = Paging()
+
+    /** Sections with a page in flight, so the Load More control can show progress and disable. */
+    private val _loadingMore = MutableStateFlow<Set<HomeTab>>(emptySet())
+    val loadingMore = _loadingMore.asStateFlow()
+
+    /** Sections AniList says are exhausted, so the Load More control can retire itself. */
+    private val _exhausted = MutableStateFlow<Set<HomeTab>>(emptySet())
+    val exhausted = _exhausted.asStateFlow()
+
+    /**
+     * Bumped on every completed load so in-flight paging can tell it belongs to a previous
+     * catalog. Without it a Load More that started before a pull-to-refresh would finish
+     * afterwards and republish the pre-refresh list it had captured.
+     */
+    private var catalogGeneration = 0
 
     var selectedTab by mutableStateOf(HomeTab.POPULAR)
         private set
@@ -69,8 +89,12 @@ class HomeViewModel : ViewModel() {
                     movies = collections.movies,
                     topRated = collections.topRated,
                 )
-                tabPages.clear()
-                trendingPage = 1
+                catalogGeneration++
+                tabPaging.values.forEach { it.page = 1; it.hasMore = true }
+                trendingPaging.page = 1
+                trendingPaging.hasMore = true
+                _exhausted.value = emptySet()
+                _loadingMore.value = emptySet()
                 DiagnosticsLog.event(
                     "Home load success spotlight=${data.spotlight.size} newest=${data.newest.size} " +
                         "popular=${data.popular.size} movies=${data.movies.size} topRated=${data.topRated.size}",
@@ -87,57 +111,79 @@ class HomeViewModel : ViewModel() {
     }
 
     fun loadMoreTab(tab: HomeTab) {
-        val current = (_state.value as? UiState.Success)?.data ?: return
-        if (tabLoading[tab] == true) return
-        tabLoading[tab] = true
+        val paging = tabPaging.getValue(tab)
+        if (paging.loading || !paging.hasMore) return
+        if (_state.value !is UiState.Success) return
+        paging.loading = true
+        _loadingMore.value = _loadingMore.value + tab
 
         viewModelScope.launch {
+            val generation = catalogGeneration
             try {
-                val nextPage = (tabPages[tab] ?: 1) + 1
-                val hideAdult = com.miruronative.data.settings.SettingsStore.hideAdultContent.value
-                val newPageData = when (tab) {
-                    HomeTab.POPULAR -> repo.popular(nextPage).items
-                    HomeTab.NEWEST -> repo.recentlyReleased(nextPage).items
-                    HomeTab.MOVIES -> repo.movies(nextPage).items
-                    HomeTab.TOP_RATED -> repo.topRated(nextPage).items
+                val nextPage = paging.page + 1
+                val page = when (tab) {
+                    HomeTab.POPULAR -> repo.popular(nextPage)
+                    HomeTab.NEWEST -> repo.recentlyReleased(nextPage)
+                    HomeTab.MOVIES -> repo.movies(nextPage)
+                    HomeTab.TOP_RATED -> repo.topRated(nextPage)
                 }
-                if (newPageData.isNotEmpty()) {
-                    tabPages[tab] = nextPage
-                    val updatedList = (current.tab(tab) + newPageData).distinctBy { it.id }
-                    val newData = when (tab) {
-                        HomeTab.POPULAR -> current.copy(popular = updatedList)
-                        HomeTab.NEWEST -> current.copy(newest = updatedList)
-                        HomeTab.MOVIES -> current.copy(movies = updatedList)
-                        HomeTab.TOP_RATED -> current.copy(topRated = updatedList)
-                    }
-                    _state.value = UiState.Success(newData)
+                // A refresh landed while this page was in flight; its results belong to a catalog
+                // that no longer exists, and appending them would resurrect the old list.
+                if (generation != catalogGeneration) return@launch
+                val current = (_state.value as? UiState.Success)?.data ?: return@launch
+
+                paging.page = nextPage
+                // AniList tells us directly when a section runs out — no need to guess from an
+                // empty page, and no need to leave a button that can no longer do anything.
+                paging.hasMore = page.hasNextPage && page.items.isNotEmpty()
+                if (!paging.hasMore) _exhausted.value = _exhausted.value + tab
+
+                if (page.items.isNotEmpty()) {
+                    val updatedList = (current.tab(tab) + page.items).distinctBy { it.id }
+                    _state.value = UiState.Success(
+                        when (tab) {
+                            HomeTab.POPULAR -> current.copy(popular = updatedList)
+                            HomeTab.NEWEST -> current.copy(newest = updatedList)
+                            HomeTab.MOVIES -> current.copy(movies = updatedList)
+                            HomeTab.TOP_RATED -> current.copy(topRated = updatedList)
+                        },
+                    )
                 }
             } catch (e: Exception) {
                 e.rethrowIfCancellation()
+                // The page stays un-advanced, so the button remains live for another attempt.
+                DiagnosticsLog.throwable("Home load more failed tab=${tab.name}", e)
             } finally {
-                tabLoading[tab] = false
+                paging.loading = false
+                _loadingMore.value = _loadingMore.value - tab
             }
         }
     }
 
     fun loadMoreTrending() {
-        val current = (_state.value as? UiState.Success)?.data ?: return
-        if (trendingLoading) return
-        trendingLoading = true
+        if (trendingPaging.loading || !trendingPaging.hasMore) return
+        if (_state.value !is UiState.Success) return
+        trendingPaging.loading = true
 
         viewModelScope.launch {
+            val generation = catalogGeneration
             try {
-                val nextPage = trendingPage + 1
-                val newPageData = repo.trending(nextPage).items
-                if (newPageData.isNotEmpty()) {
-                    trendingPage = nextPage
-                    val updatedList = (current.spotlight + newPageData).distinctBy { it.id }
+                val nextPage = trendingPaging.page + 1
+                val page = repo.trending(nextPage)
+                if (generation != catalogGeneration) return@launch
+                val current = (_state.value as? UiState.Success)?.data ?: return@launch
+
+                trendingPaging.page = nextPage
+                trendingPaging.hasMore = page.hasNextPage && page.items.isNotEmpty()
+                if (page.items.isNotEmpty()) {
+                    val updatedList = (current.spotlight + page.items).distinctBy { it.id }
                     _state.value = UiState.Success(current.copy(spotlight = updatedList))
                 }
             } catch (e: Exception) {
                 e.rethrowIfCancellation()
+                DiagnosticsLog.throwable("Home load more trending failed", e)
             } finally {
-                trendingLoading = false
+                trendingPaging.loading = false
             }
         }
     }

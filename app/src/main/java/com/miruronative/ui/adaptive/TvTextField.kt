@@ -156,11 +156,21 @@ fun TvNativeTextField(
                 editor.setHintTextColor(hintColor)
                 editor.inputType = inputType.androidValue
                 editor.imeOptions = imeAction
-                (editor.tag as? NativeTvTextWatcher)?.onValueChange = currentOnValueChange
-                if (editor.text.toString() != value) {
-                    val selection = editor.selectionStart.coerceAtLeast(0)
-                    editor.setText(value)
-                    editor.setSelection(selection.coerceAtMost(value.length))
+                val watcher = editor.tag as? NativeTvTextWatcher
+                watcher?.onValueChange = currentOnValueChange
+                val echoes = watcher?.pendingEchoes
+                val echoIndex = echoes?.indexOf(value) ?: -1
+                when {
+                    // This value is the field's own keystroke coming back. The editor has already
+                    // moved past it, so writing it would delete whatever was typed since.
+                    echoIndex >= 0 -> repeat(echoIndex + 1) { echoes?.removeFirst() }
+                    // A genuine external change: a picked history term, a reset, a restored query.
+                    editor.text.toString() != value -> {
+                        echoes?.clear()
+                        val selection = editor.selectionStart.coerceAtLeast(0)
+                        editor.setText(value)
+                        editor.setSelection(selection.coerceAtMost(value.length))
+                    }
                 }
             },
         )
@@ -171,11 +181,30 @@ private class NativeTvTextWatcher(
     private val editor: EditText,
     var onValueChange: (String) -> Unit,
 ) : TextWatcher {
+    /**
+     * Values this field has pushed up that have not yet come back down through recomposition.
+     *
+     * Compose delivers state a frame or more later, so a second keystroke can land in the EditText
+     * before the first one's value arrives in `update`. Writing that stale value back would undo
+     * the newer keystroke — typing "Naruto" on a TV landed as "Nuo". Anything still queued here is
+     * an echo of the user's own typing and must not be written back.
+     */
+    val pendingEchoes = ArrayDeque<String>()
+
     override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
     override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
     override fun afterTextChanged(text: Editable?) {
-        onValueChange(text?.toString().orEmpty())
+        val value = text?.toString().orEmpty()
+        pendingEchoes.addLast(value)
+        // A value the caller silently rewrites never comes back to clear its entry, so cap the
+        // queue rather than letting a long session grow it without bound.
+        while (pendingEchoes.size > MAX_PENDING_ECHOES) pendingEchoes.removeFirst()
+        onValueChange(value)
         editor.postInvalidate()
+    }
+
+    private companion object {
+        const val MAX_PENDING_ECHOES = 32
     }
 }
 

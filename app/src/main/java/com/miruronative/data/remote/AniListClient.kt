@@ -103,6 +103,7 @@ class AniListClient(
         title { romaji english native userPreferred }
         coverImage { large extraLarge color }
         bannerImage
+        trailer { thumbnail }
         format
         season
         seasonYear

@@ -181,6 +181,37 @@ class WatchSourcePolicyTest {
     }
 
     @Test
+    fun `a seek that was never recorded gets no recovery`() {
+        // This is the shape of the reported "my server changes when I skip" bug: the seek marker
+        // was only written by the TV D-pad path, so a phone scrub or a seek-bar drag left elapsed
+        // at MAX_VALUE and the stale-segment error that follows a seek failed straight over to
+        // another provider. PlayerSurface now records every seek via onPositionDiscontinuity.
+        assertEquals(
+            false,
+            shouldRecoverSeekError(
+                errorCode = 2_002,
+                elapsedSinceSeekMs = Long.MAX_VALUE,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+        // ...and with the seek recorded, the same error is retried on the current server instead.
+        assertTrue(
+            shouldRecoverSeekError(
+                errorCode = 2_002,
+                elapsedSinceSeekMs = 0L,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+        assertTrue(
+            shouldRecoverSeekError(
+                errorCode = 2_999,
+                elapsedSinceSeekMs = SEEK_ERROR_RECOVERY_WINDOW_MS,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+    }
+
+    @Test
     fun `quality height is recovered from provider label`() {
         assertEquals(1080, declaredVideoHeight("AllAnime 1080p Yt-mp4"))
         assertEquals(720, declaredVideoHeight("720P"))

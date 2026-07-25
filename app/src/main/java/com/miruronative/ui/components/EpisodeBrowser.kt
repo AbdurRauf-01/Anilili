@@ -260,14 +260,20 @@ private fun EpisodeFilterField(
                         innerTextField()
                     }
                     if (query.isNotEmpty()) {
-                        Icon(
-                            Icons.Default.Clear,
-                            contentDescription = "Clear filter",
-                            modifier = Modifier
-                                .size(20.dp)
-                                .clickable { onQueryChange("") },
-                            tint = colors.onSurfaceVariant,
-                        )
+                        // The glyph stays 20dp to suit the compact field, but the touch target
+                        // has to stay a real one — a bare 20dp clickable Icon is well under the
+                        // 48dp minimum and is genuinely hard to hit.
+                        IconButton(
+                            onClick = { onQueryChange("") },
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Clear,
+                                contentDescription = "Clear filter",
+                                modifier = Modifier.size(20.dp),
+                                tint = colors.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             },

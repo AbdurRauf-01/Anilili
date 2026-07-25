@@ -82,6 +82,10 @@ object ProviderCatalog {
     fun sortKey(provider: String): Int =
         order.indexOf(provider).let { if (it >= 0) it else Int.MAX_VALUE }
 
+    /** Every server a user can pin in Settings, in the same order the player's picker shows. */
+    fun selectableProviders(hideAdult: Boolean): List<String> =
+        if (hideAdult) order.filterNot(::isAdultOnly) else order
+
     fun label(provider: String): String = when (provider) {
         "anibd" -> "AniBD"
         "2dhive" -> "2Dhive"

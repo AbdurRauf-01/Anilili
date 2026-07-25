@@ -57,12 +57,14 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
+import com.miruronative.R
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.model.Media
@@ -227,7 +229,7 @@ private fun TvHero(
             ?.trim()
             .orEmpty()
     }
-    val image = media.bannerImage ?: media.coverImage.extraLarge ?: media.coverImage.best
+    val image = media.heroImage
 
     Box(
         Modifier
@@ -240,7 +242,12 @@ private fun TvHero(
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
-            alignment = Alignment.CenterEnd,
+            // TopCenter suits both shapes this falls back through. A 1900x400 banner is wider than
+            // this box, so Crop trims horizontally and the *horizontal* half of the alignment
+            // decides: CenterEnd pinned it to the banner's far right, which is usually empty sky.
+            // A portrait cover (no banner available) is narrower, so Crop trims vertically and the
+            // *vertical* half decides: centre landed on a torso, top lands on faces.
+            alignment = Alignment.TopCenter,
         )
         Box(
             Modifier.fillMaxSize().background(
@@ -291,7 +298,8 @@ private fun TvHero(
                         .background(MaterialTheme.colorScheme.primary),
                 )
                 Text(
-                    "ANILILI FEATURED",
+                    // Brand as written; the eyebrow keeps its wide tracking without shouting it.
+                    "${stringResource(R.string.app_name)} Featured",
                     color = Color.White.copy(.78f),
                     fontWeight = FontWeight.Bold,
                     fontSize = 11.sp,
@@ -465,7 +473,7 @@ private fun TvMediaCard(
 ) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-media-card-scale")
-    val image = media.bannerImage ?: media.coverImage.extraLarge ?: media.coverImage.best
+    val image = media.heroImage
 
     Column(
         modifier = Modifier

@@ -526,12 +526,6 @@ private fun volumeIcon(fraction: Float): ImageVector = when {
     else -> Icons.AutoMirrored.Filled.VolumeUp
 }
 
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
-
 private fun readBrightness(activity: Activity?): Float {
     val attr = activity?.window?.attributes?.screenBrightness ?: return 0.5f
     if (attr >= 0f) return attr.coerceIn(0f, 1f)

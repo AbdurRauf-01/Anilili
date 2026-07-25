@@ -117,6 +117,9 @@ private fun deviceDefaultQuality(): DefaultQuality =
 /** No global server has been chosen yet; the launch route supplies the initial server. */
 const val DEFAULT_PREFERRED_PROVIDER = "auto"
 
+/** How many servers the user can rank. Beyond three, the catalog's own order takes over anyway. */
+const val MAX_SERVER_PRIORITY = 3
+
 /** Transactional DataStore preferences shared by playback and the Library settings UI. */
 object SettingsStore {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -171,6 +174,24 @@ object SettingsStore {
     private val _episodeLayout = MutableStateFlow(EpisodeLayout.LIST)
     val episodeLayout = _episodeLayout.asStateFlow()
 
+    /**
+     * The Miruro mirror that last loaded successfully on this network. ISPs block the mirrors
+     * piecemeal, and rediscovering that from scratch each launch costs the whole failover walk.
+     */
+    private val _lastWorkingPipeOrigin = MutableStateFlow("")
+    val lastWorkingPipeOrigin = _lastWorkingPipeOrigin.asStateFlow()
+
+    /**
+     * The user's servers in the order they should be tried, first choice first, at most
+     * [MAX_SERVER_PRIORITY] of them. Empty means "no pinned choice" — the catalog's own order.
+     */
+    private val _serverPriority = MutableStateFlow<List<String>>(emptyList())
+    val serverPriority = _serverPriority.asStateFlow()
+
+    /**
+     * Head of [serverPriority], or "auto" when nothing is pinned. Kept as its own flow because the
+     * player's server sheet, the ★ badge, and the watch route all read a single preferred name.
+     */
     private val _preferredProvider = MutableStateFlow(DEFAULT_PREFERRED_PROVIDER)
     val preferredProvider = _preferredProvider.asStateFlow()
     private val loaded = MutableStateFlow(false)
@@ -241,10 +262,40 @@ object SettingsStore {
         _menuLanguage.value = value
         scope.launch { store.edit { it[MENU_LANGUAGE] = value.storedValue } }
     }
+    /** Normalises, de-duplicates and caps a priority list, then mirrors the head into [preferredProvider]. */
+    private fun applyServerPriority(value: List<String>) {
+        val clean = value.map { it.trim().lowercase() }
+            .filter { it.isNotBlank() && it != DEFAULT_PREFERRED_PROVIDER }
+            .distinct()
+            .take(MAX_SERVER_PRIORITY)
+        _serverPriority.value = clean
+        _preferredProvider.value = clean.firstOrNull() ?: DEFAULT_PREFERRED_PROVIDER
+    }
+
+    fun setLastWorkingPipeOrigin(value: String) {
+        if (_lastWorkingPipeOrigin.value == value) return
+        _lastWorkingPipeOrigin.value = value
+        scope.launch { store.edit { it[LAST_PIPE_ORIGIN] = value } }
+    }
+
+    fun setServerPriority(value: List<String>) {
+        applyServerPriority(value)
+        val stored = _serverPriority.value.joinToString(",")
+        scope.launch { store.edit { it[SERVER_PRIORITY] = stored } }
+    }
+
+    /**
+     * Promotes [value] to first choice, keeping the rest of the order behind it. Picking "auto"
+     * clears the whole list — with no first choice there is nothing for the fallbacks to fall back
+     * from, and leaving them would silently promote one the user never chose.
+     */
     fun setPreferredProvider(value: String) {
-        val storedValue = value.trim().lowercase().ifBlank { DEFAULT_PREFERRED_PROVIDER }
-        _preferredProvider.value = storedValue
-        scope.launch { store.edit { it[PREFERRED_PROVIDER] = storedValue } }
+        val name = value.trim().lowercase().ifBlank { DEFAULT_PREFERRED_PROVIDER }
+        if (name == DEFAULT_PREFERRED_PROVIDER) {
+            setServerPriority(emptyList())
+        } else {
+            setServerPriority(listOf(name) + _serverPriority.value.filterNot { it == name })
+        }
     }
 
     /** Guarantees cold-start consumers see the persisted preference instead of the in-memory default. */
@@ -303,8 +354,13 @@ object SettingsStore {
         _downloadQuality.value = DownloadQuality.fromStored(prefs[DOWNLOAD_QUALITY])
         _downloadDestination.value = DownloadDestination.fromStored(prefs[DOWNLOAD_DESTINATION])
         _episodeLayout.value = EpisodeLayout.fromStored(prefs[EPISODE_LAYOUT])
-        _preferredProvider.value =
-            prefs[PREFERRED_PROVIDER]?.takeIf(String::isNotBlank) ?: DEFAULT_PREFERRED_PROVIDER
+        // Installs that predate the ordered list still carry a single preferred server; seed the
+        // list from it so an existing choice survives the upgrade rather than resetting to auto.
+        applyServerPriority(
+            prefs[SERVER_PRIORITY]?.takeIf(String::isNotBlank)?.split(",")
+                ?: listOfNotNull(prefs[PREFERRED_PROVIDER]?.takeIf(String::isNotBlank)),
+        )
+        _lastWorkingPipeOrigin.value = prefs[LAST_PIPE_ORIGIN].orEmpty()
         loaded.value = true
     }
 
@@ -346,5 +402,7 @@ object SettingsStore {
     private val DOWNLOAD_DESTINATION = stringPreferencesKey("download_destination")
     private val EPISODE_LAYOUT = stringPreferencesKey("episode_layout")
     private val PREFERRED_PROVIDER = stringPreferencesKey("preferred_provider")
+    private val SERVER_PRIORITY = stringPreferencesKey("server_priority")
+    private val LAST_PIPE_ORIGIN = stringPreferencesKey("last_pipe_origin")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }

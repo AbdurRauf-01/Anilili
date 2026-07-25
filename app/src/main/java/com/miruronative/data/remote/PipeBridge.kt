@@ -10,6 +10,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -66,6 +67,16 @@ object PipeBridge {
         }
     }
 
+    /**
+     * How long a mirror gets to finish loading before it is treated as unreachable.
+     *
+     * `onReceivedError` only fires once the network stack gives up, which on a blocking ISP took
+     * 32 seconds per mirror in a user's log — 64 seconds of dead time before the third mirror was
+     * even tried, and by then the catalog wait had long since expired and the app reported "no
+     * sources" for a title with plenty. Rolling over on our own clock keeps that bounded.
+     */
+    private const val MIRROR_TIMEOUT_MS = 7_000L
+
     @Volatile private var webView: WebView? = null
     @Volatile private var ready = CompletableDeferred<Boolean>()
     @Volatile private var originIndex = 0
@@ -73,6 +84,31 @@ object PipeBridge {
     private val counter = AtomicLong(0)
 
     private val activeOrigin: String get() = ORIGINS[originIndex]
+
+    private val mirrorWatchdog = Runnable {
+        DiagnosticsLog.event("PipeBridge mirror timed out after ${MIRROR_TIMEOUT_MS}ms origin=$activeOrigin")
+        advanceMirror()
+    }
+
+    private fun armMirrorWatchdog() {
+        main.removeCallbacks(mirrorWatchdog)
+        main.postDelayed(mirrorWatchdog, MIRROR_TIMEOUT_MS)
+    }
+
+    /** Rolls to the next mirror, or gives up once they are exhausted. Main thread only. */
+    private fun advanceMirror() {
+        main.removeCallbacks(mirrorWatchdog)
+        if (ready.isCompleted) return
+        if (originIndex < ORIGINS.lastIndex) {
+            originIndex++
+            DiagnosticsLog.event("PipeBridge trying mirror $activeOrigin")
+            armMirrorWatchdog()
+            webView?.loadUrl("$activeOrigin/")
+        } else {
+            DiagnosticsLog.event("PipeBridge all mirrors failed")
+            ready.complete(false)
+        }
+    }
 
     /** Called from the hosting Composable on the main thread with a freshly created WebView. */
     @SuppressLint("SetJavaScriptEnabled")
@@ -117,6 +153,10 @@ object PipeBridge {
                 Log.d(TAG, "onPageFinished: $url  title=${view?.title}")
                 // Give Cloudflare a moment to settle, then allow fetches.
                 if (url != null && url.startsWith(activeOrigin)) {
+                    main.removeCallbacks(mirrorWatchdog)
+                    // Remember what worked. On a network that blocks the first mirrors, starting
+                    // from scratch every launch means paying the whole failover walk every time.
+                    SettingsStore.setLastWorkingPipeOrigin(activeOrigin)
                     main.postDelayed(
                         {
                             if (!ready.isCompleted) ready.complete(true)
@@ -140,13 +180,7 @@ object PipeBridge {
                 )
                 // This mirror is unreachable (ISP block, DNS, site down): roll to the next one.
                 // Only once all mirrors fail do waiters unblock into the cache/error path.
-                if (originIndex < ORIGINS.lastIndex) {
-                    originIndex++
-                    DiagnosticsLog.event("PipeBridge trying mirror $activeOrigin")
-                    main.post { webView?.loadUrl("$activeOrigin/") }
-                } else if (!ready.isCompleted) {
-                    ready.complete(false)
-                }
+                main.post { advanceMirror() }
             }
 
             @android.annotation.TargetApi(android.os.Build.VERSION_CODES.O)
@@ -159,7 +193,11 @@ object PipeBridge {
                 return true
             }
         }
+        // Start from whichever mirror last answered on this network, so a user whose ISP blocks
+        // the first ones pays the failover walk once rather than on every launch.
+        originIndex = ORIGINS.indexOf(SettingsStore.lastWorkingPipeOrigin.value).coerceAtLeast(0)
         DiagnosticsLog.event("PipeBridge load origin=$activeOrigin")
+        armMirrorWatchdog()
         wv.loadUrl("$activeOrigin/")
     }
 

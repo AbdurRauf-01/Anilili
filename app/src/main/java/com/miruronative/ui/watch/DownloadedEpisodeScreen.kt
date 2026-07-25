@@ -20,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,15 +41,6 @@ import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.nav.Routes
-
-private fun Context.findActivity(): Activity? {
-    var ctx = this
-    while (ctx is ContextWrapper) {
-        if (ctx is Activity) return ctx
-        ctx = ctx.baseContext
-    }
-    return null
-}
 
 /** Full player entry point for an episode already persisted in Media3's download cache. */
 @Composable
@@ -72,10 +64,8 @@ fun DownloadedEpisodeScreen(
         onDispose { PlaybackService.pauseActivePlayback() }
     }
 
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        if (device.isTv) {
-            runCatching { coil.Coil.imageLoader(context).memoryCache?.clear() }
-        }
+    LaunchedEffect(Unit) {
+        if (device.isTv) releaseImageMemoryForPlayback(context)
     }
 
     // Auto rotate downloaded video to fullscreen landscape without needing to rotate device manually

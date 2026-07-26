@@ -1,17 +1,22 @@
 package com.miruronative.playback
 
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.WebSettings
 import androidx.annotation.OptIn
+import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.util.NotificationUtil
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.database.DatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
@@ -23,12 +28,16 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.media3.exoplayer.offline.DownloadManager
+import androidx.media3.exoplayer.offline.DownloadNotificationHelper
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
 import com.miruronative.data.settings.DownloadQuality
+import com.miruronative.MainActivity
+import com.miruronative.R
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.ui.nav.Routes
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -140,7 +149,7 @@ object EpisodeDownloads {
     private var progressPoller: Job? = null
 
     private lateinit var appContext: Context
-    private lateinit var databaseProvider: StandaloneDatabaseProvider
+    private lateinit var databaseProvider: DatabaseProvider
     private lateinit var downloadCache: SimpleCache
     private lateinit var upstreamFactory: DataSource.Factory
     private lateinit var manager: DownloadManager
@@ -160,7 +169,7 @@ object EpisodeDownloads {
         synchronized(this) {
             if (initialized) return
             appContext = context.applicationContext
-            databaseProvider = StandaloneDatabaseProvider(appContext)
+            databaseProvider = ExoDatabase.provider(appContext)
             downloadCache = SimpleCache(
                 File(appContext.filesDir, DOWNLOAD_DIRECTORY),
                 NoOpCacheEvictor(),
@@ -263,9 +272,14 @@ object EpisodeDownloads {
         }
         val id = idFor(metadata.anilistId, metadata.category, metadata.episodeNumber)
         val preparedMetadata = metadata.copy(
-            subtitles = metadata.subtitles.mapIndexed { index, subtitle ->
-                subtitle.copy(fileName = subtitle.fileName ?: subtitleFileName(id, index, subtitle.url))
-            },
+            // Providers routinely list the same track twice — BLACK TORCH offers two identical
+            // "English" tracks. Downloading both wastes a request and, once exported, drops two
+            // sidecars next to the MP4 that the viewer has no way to tell apart.
+            subtitles = metadata.subtitles
+                .distinctBy { it.language.trim().lowercase() to it.label.trim().lowercase() }
+                .mapIndexed { index, subtitle ->
+                    subtitle.copy(fileName = subtitle.fileName ?: subtitleFileName(id, index, subtitle.url))
+                },
             quality = if (stream.isHls) quality.label else stream.label,
             streamType = if (stream.isHls) "hls" else "direct",
         )
@@ -323,7 +337,15 @@ object EpisodeDownloads {
                     for (periodIndex in 0 until helper.periodCount) {
                         helper.replaceTrackSelections(periodIndex, trackParameters)
                     }
-                    val data = json.encodeToString(preparedMetadata).encodeToByteArray()
+                    // The chosen resolution is a ceiling, not a promise: a source offering only a
+                    // single 1080p rendition still yields 1080p. Record what was actually selected,
+                    // otherwise the library and the exported filename both claim a resolution the
+                    // file does not have.
+                    val resolvedMetadata = selectedVideoHeight(helper)
+                        ?.let { preparedMetadata.copy(quality = "${it}p") }
+                        ?: preparedMetadata
+                    metadataById[id] = resolvedMetadata
+                    val data = json.encodeToString(resolvedMetadata).encodeToByteArray()
                     val request = helper.getDownloadRequest(id, data)
                     requestByUri[request.uri.toString()] = request
                     DownloadService.sendAddDownload(
@@ -432,6 +454,21 @@ object EpisodeDownloads {
             ?: builder.build()
     }
 
+    /** Height of the video track Media3 actually selected, once track selections are applied. */
+    private fun selectedVideoHeight(helper: DownloadHelper): Int? =
+        (0 until helper.periodCount)
+            .asSequence()
+            .flatMap { helper.getTracks(it).groups.asSequence() }
+            .filter { it.type == C.TRACK_TYPE_VIDEO }
+            .flatMap { group ->
+                (0 until group.length)
+                    .asSequence()
+                    .filter(group::isTrackSelected)
+                    .map { group.getTrackFormat(it).height }
+            }
+            .filter { it != Format.NO_VALUE }
+            .maxOrNull()
+
     private fun finishPreparing(id: String) {
         _preparingIds.value -= id
         if (preparingDownloadId == id) preparingDownloadId = null
@@ -471,6 +508,7 @@ object EpisodeDownloads {
             finalException?.let {
                 DiagnosticsLog.throwable("Episode download failed id=${download.request.id}", it)
             }
+            notifyTerminalState(download)
             refreshDownloads()
         }
 
@@ -485,6 +523,44 @@ object EpisodeDownloads {
             if (activeDownloadId == download.request.id) activeDownloadId = null
             refreshDownloads()
         }
+    }
+
+    /**
+     * Posts a notification when a download reaches a terminal state.
+     *
+     * The service's foreground notification disappears with the service, so without this a
+     * download that finishes while the app is in the background leaves nothing behind and the
+     * viewer has to open the library to find out whether it worked.
+     */
+    private fun notifyTerminalState(download: Download) {
+        val label = decodeMetadata(download.request)
+            ?.let { "${it.seriesTitle} · Episode ${it.episodeNumber}" }
+        val helper = DownloadNotificationHelper(appContext, DOWNLOAD_CHANNEL_ID)
+        val intent = Intent(appContext, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(Routes.EXTRA_ROUTE, Routes.MORE)
+        }
+        val pending = PendingIntent.getActivity(
+            appContext,
+            download.request.id.hashCode(),
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = when (download.state) {
+            Download.STATE_COMPLETED ->
+                helper.buildDownloadCompletedNotification(appContext, R.drawable.ic_notification, pending, label)
+            Download.STATE_FAILED ->
+                helper.buildDownloadFailedNotification(appContext, R.drawable.ic_notification, pending, label)
+            else -> return
+        }
+        // Keyed on the download so a batch produces one line per episode rather than overwriting.
+        runCatching {
+            NotificationUtil.setNotification(
+                appContext,
+                TERMINAL_NOTIFICATION_ID_BASE + (download.request.id.hashCode() and 0xFFFF),
+                notification,
+            )
+        }.onFailure { DiagnosticsLog.throwable("Episode download notification failed", it) }
     }
 
     private fun refreshDownloads() {
@@ -741,6 +817,8 @@ object EpisodeDownloads {
         else -> EpisodeDownloadState.QUEUED
     }
 
+    private const val DOWNLOAD_CHANNEL_ID = "episode_downloads"
+    private const val TERMINAL_NOTIFICATION_ID_BASE = 7_400
     private const val DOWNLOAD_DIRECTORY = "episode-downloads"
     private const val SUBTITLE_DIRECTORY = "episode-download-subtitles"
     private const val PUBLIC_DOWNLOAD_SUBDIRECTORY = "Anilili"

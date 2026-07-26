@@ -60,7 +60,18 @@ object ProviderCatalog {
         (miruroOrder - miruroEmbed).toSet() + fastAnivexaProviders
 
     fun isFast(provider: String): Boolean = provider in fastProviders
+    /** Whether the provider's own website offers download links, reached by opening a browser. */
     fun supportsExternalDownloads(provider: String): Boolean = provider in externalDownloadProviders
+
+    /**
+     * Whether the app can save an episode from this provider into the offline library.
+     *
+     * Deliberately separate from [supportsExternalDownloads]: an embed plays inside a WebView and
+     * exposes no stream the downloader can fetch, so a provider can offer download links on its
+     * site while the app can do nothing with it. Conflating the two put a download glyph on Kiwi
+     * and then hid the download button.
+     */
+    fun supportsOfflineDownload(provider: String): Boolean = isNative(provider)
 
     // Default row order: bonk (Miruro pipe) then anibd (Anivexa) lead as the two default
     // sources — independent backends, both fast and reliable — with senshi right behind.

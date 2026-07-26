@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Looper
 import android.provider.MediaStore
 import androidx.annotation.OptIn
+import androidx.annotation.RequiresApi
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.Clock
@@ -197,6 +198,7 @@ object EpisodeExport {
      * Runs one export end to end. Called by [EpisodeExportWorker] so the work keeps its foreground
      * notification and survives the app being backgrounded.
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     internal suspend fun performExport(
         context: Context,
         downloadId: String,
@@ -376,6 +378,7 @@ object EpisodeExport {
     }
 
     /** Streams the finished MP4 into the public Downloads collection and returns its uri. */
+    @RequiresApi(Build.VERSION_CODES.Q)
     private suspend fun publish(
         context: Context,
         source: File,
@@ -415,6 +418,7 @@ object EpisodeExport {
      * Drops the downloaded subtitle files next to the MP4 under a matching name. Media3's MP4
      * muxer will not take a text track, and a sidecar is what external players look for anyway.
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     private suspend fun copySubtitlesBeside(
         context: Context,
         metadata: EpisodeDownloadMetadata,

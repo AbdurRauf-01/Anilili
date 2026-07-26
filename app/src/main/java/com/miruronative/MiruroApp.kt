@@ -22,8 +22,15 @@ import com.miruronative.data.reminder.AniListNotificationPushManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.EpisodeDownloads
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class MiruroApp : Application(), ImageLoaderFactory {
+    /** Lives as long as the process; only used for work deliberately kept out of onCreate. */
+    private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         DiagnosticsLog.init(this)
@@ -40,8 +47,19 @@ class MiruroApp : Application(), ImageLoaderFactory {
             DiagnosticsLog.event("MiruroApp diagnostics process; skipping normal app init")
             return
         }
-        runCatching { EpisodeDownloads.initialize(this) }
-            .onFailure { DiagnosticsLog.throwable("EpisodeDownloads initialization failed", it) }
+        // Off the startup path deliberately. Opening Media3's download index scans the cache
+        // directory and opens SQLite — measured at 211ms of the 440ms spent in onCreate on a TV
+        // stick, with an empty cache, and it grows with the number of downloads. Nothing during
+        // startup reads it: the first real consumer is the Library screen, and every entry point
+        // into EpisodeDownloads initializes on demand behind the same lock, so a caller that
+        // arrives early simply waits for this to finish rather than racing it.
+        startupScope.launch {
+            // First, so a report from a device that "just closed" opens with the reason it closed.
+            DiagnosticsLog.deviceProfile(this@MiruroApp)
+            DiagnosticsLog.logPreviousExits(this@MiruroApp)
+            runCatching { EpisodeDownloads.initialize(this@MiruroApp) }
+                .onFailure { DiagnosticsLog.throwable("EpisodeDownloads initialization failed", it) }
+        }
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(
                 StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build(),

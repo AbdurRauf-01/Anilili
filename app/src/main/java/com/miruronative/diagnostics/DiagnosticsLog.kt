@@ -199,6 +199,112 @@ object DiagnosticsLog {
         }, timeoutMs)
     }
 
+    /**
+     * One line that identifies the machine a report came from.
+     *
+     * Most reports arrive as "it closes on my Fire Stick", and the sticks are not one device: a
+     * 1st-gen stick is a 1 GB, API 22, Fire OS 5 box with an ancient Amazon WebView, while a 4K Max
+     * is 2 GB and API 32. Those fail in completely different ways, and without this the report
+     * cannot be mapped to either. `isLowRamDevice` is the single most useful bit here — it is what
+     * the platform itself uses to decide how aggressively to kill us.
+     */
+    fun deviceProfile(context: Context) {
+        runCatching {
+            val app = context.applicationContext
+            val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val fireOs = listOf("ro.build.version.fireos", "ro.build.version.fireos.sdk")
+                .firstNotNullOfOrNull { systemProperty(it)?.takeIf(String::isNotBlank) }
+            val amazonDevice = Build.MANUFACTURER.equals("Amazon", ignoreCase = true)
+            event(
+                "device profile manufacturer=${Build.MANUFACTURER} model=${Build.MODEL} " +
+                    "device=${Build.DEVICE} product=${Build.PRODUCT} " +
+                    "sdk=${Build.VERSION.SDK_INT} fireOs=${fireOs ?: if (amazonDevice) "amazon-unknown" else "no"} " +
+                    "lowRam=${activityManager?.isLowRamDevice} " +
+                    "memoryClassMb=${activityManager?.memoryClass} " +
+                    "largeMemoryClassMb=${activityManager?.largeMemoryClass} " +
+                    "abis=${Build.SUPPORTED_ABIS.joinToString("/")} " +
+                    "network=${networkSummary(app)}",
+            )
+        }.onFailure { throwable("device profile unavailable", it) }
+    }
+
+    /** Wi-Fi versus Ethernet matters on TV: the sticks throttle Wi-Fi hard under memory pressure. */
+    private fun networkSummary(context: Context): String = runCatching {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager ?: return "unknown"
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "legacy"
+        val network = manager.activeNetwork ?: return "offline"
+        val caps = manager.getNetworkCapabilities(network) ?: return "unknown"
+        val transport = when {
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            else -> "other"
+        }
+        "$transport,downKbps=${caps.linkDownstreamBandwidthKbps},upKbps=${caps.linkUpstreamBandwidthKbps}"
+    }.getOrDefault("unknown")
+
+    private fun systemProperty(key: String): String? = runCatching {
+        @Suppress("PrivateApi")
+        val systemProperties = Class.forName("android.os.SystemProperties")
+        systemProperties.getMethod("get", String::class.java).invoke(null, key) as? String
+    }.getOrNull()
+
+    /**
+     * Why the process died last time, straight from the system.
+     *
+     * A TV that "just exits" is the least diagnosable failure this app has: when the kill comes
+     * from outside the process — the low-memory killer, an ANR, the system reclaiming the task —
+     * nothing lands in the crash log, and the user can only report that it closed. The platform
+     * has kept the real reason since API 30; reading it back on the next launch turns "it exits on
+     * One Piece" into a specific cause without needing a reproduction.
+     */
+    fun logPreviousExits(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            event("previous exit reasons unavailable on API ${Build.VERSION.SDK_INT}")
+            return
+        }
+        runCatching {
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                ?: return
+            val exits = manager.getHistoricalProcessExitReasons(context.packageName, 0, 5)
+            if (exits.isEmpty()) {
+                event("no previous process exits recorded")
+                return
+            }
+            exits.forEach { info ->
+                event(
+                    "previous exit reason=${exitReasonName(info.reason)} status=${info.status} " +
+                        "importance=${info.importance} pssKb=${info.pss} rssKb=${info.rss} " +
+                        "at=${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(info.timestamp))} " +
+                        "description=${info.description ?: "none"}",
+                )
+            }
+        }.onFailure { throwable("previous exit reasons unavailable", it) }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private fun exitReasonName(reason: Int): String = when (reason) {
+        android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
+        android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH"
+        android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
+        android.app.ApplicationExitInfo.REASON_ANR -> "ANR"
+        android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INIT_FAILURE"
+        android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE"
+        android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCES"
+        android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+        android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
+        android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
+        android.app.ApplicationExitInfo.REASON_OTHER -> "OTHER"
+        android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+        android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
+        // Routine on every install; naming them keeps the genuinely interesting reasons legible.
+        android.app.ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "PACKAGE_STATE_CHANGE"
+        android.app.ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "PACKAGE_UPDATED"
+        android.app.ApplicationExitInfo.REASON_FREEZER -> "FREEZER"
+        else -> "UNKNOWN($reason)"
+    }
+
     fun event(message: String) {
         append("${timestamp()} +${SystemClock.elapsedRealtime()}ms  $message\n")
     }

@@ -53,6 +53,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -143,9 +144,9 @@ fun EmbedWebView(
     val activeReferer = activeQualityStream?.referer ?: referer
     var captionAppearanceVisible by remember(url) { mutableStateOf(false) }
     var settingsSheetVisible by remember(url) { mutableStateOf(false) }
-    var playbackSpeed by remember(url) { mutableStateOf(1f) }
+    var playbackSpeed by remember(url) { mutableFloatStateOf(1f) }
     // The speed to restore once a hold-for-2x gesture ends (the user's chosen playback speed).
-    var preHoldSpeed by remember(url) { mutableStateOf(1f) }
+    var preHoldSpeed by remember(url) { mutableFloatStateOf(1f) }
     var webPlaybackAvailable by remember(activeUrl) { mutableStateOf(false) }
     var pendingSeekMs by remember(url, startPositionMs) { mutableLongStateOf(startPositionMs) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -168,14 +169,14 @@ fun EmbedWebView(
     var pendingTvSeekTargetMs by remember(activeUrl) { mutableStateOf<Long?>(null) }
     var tvSeekRequest by remember(activeUrl) { mutableIntStateOf(0) }
     var webIsPlaying by remember(url) { mutableStateOf(false) }
-    var webVolume by remember(url) { mutableStateOf(1f) }
-    var lastAudibleVolume by remember(url) { mutableStateOf(1f) }
+    var webVolume by remember(url) { mutableFloatStateOf(1f) }
+    var lastAudibleVolume by remember(url) { mutableFloatStateOf(1f) }
     // The device media stream remains the volume/mute fallback for old WebView builds that do not
     // support document-start injection into cross-origin frames.
     val embedAudioManager = remember(context) {
         context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
     }
-    var deviceVolume by remember { mutableStateOf(readDeviceVolume(embedAudioManager)) }
+    var deviceVolume by remember { mutableFloatStateOf(readDeviceVolume(embedAudioManager)) }
     var tvControlsVisible by remember(url) { mutableStateOf(false) }
     var tvControlsInteraction by remember(url) { mutableIntStateOf(0) }
     var episodeDrawerExpanded by remember(url) { mutableStateOf(false) }

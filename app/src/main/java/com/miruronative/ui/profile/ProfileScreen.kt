@@ -98,6 +98,8 @@ import com.miruronative.playback.EpisodeExport
 import com.miruronative.playback.EpisodeExportState
 import com.miruronative.playback.EpisodeExportStatus
 import com.miruronative.playback.OfflineEpisode
+import com.miruronative.playback.episodeDownloadBadges
+import com.miruronative.ui.components.DownloadCoverBadge
 import com.miruronative.playback.offlineEpisodes
 import java.time.Instant
 import java.time.ZoneId
@@ -759,6 +761,14 @@ private fun EpisodeDownloadCard(
 ) {
     val download = episode.download
     val metadata = episode.metadata
+    // The corner tick already says "saved"; the overlay is only for work still in flight.
+    val coverState = remember(download, exportStatus, episode.exported) {
+        episodeDownloadBadges(
+            downloads = listOfNotNull(download),
+            exportStatuses = listOfNotNull(exportStatus).associateBy { it.downloadId },
+            exported = listOfNotNull(episode.exported),
+        )[episode.id]?.takeIf { it.isBusy }
+    }
     val device = LocalAppDeviceProfile.current
     val shape = RoundedCornerShape(12.dp)
     val cardModifier = if (modifier != Modifier) {
@@ -810,6 +820,12 @@ private fun EpisodeDownloadCard(
                         modifier = Modifier.align(Alignment.TopEnd).padding(10.dp),
                     )
                 }
+                // Same cue as the watch and detail lists, so an in-flight episode looks identical
+                // wherever the viewer happens to be looking at it.
+                DownloadCoverBadge(
+                    state = coverState,
+                    modifier = Modifier.matchParentSize(),
+                )
             }
             Column(
                 Modifier.padding(horizontal = 12.dp, vertical = 10.dp),

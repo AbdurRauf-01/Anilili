@@ -46,6 +46,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,6 +82,11 @@ import com.miruronative.data.settings.EpisodeLayout
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.UiState
+import com.miruronative.playback.EpisodeDownloadUi
+import com.miruronative.playback.EpisodeDownloads
+import com.miruronative.playback.EpisodeExport
+import com.miruronative.playback.episodeDownloadBadges
+import com.miruronative.ui.components.DownloadCoverBadge
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.TvNativeTextField
 import com.miruronative.ui.adaptive.focusHighlight
@@ -286,6 +292,14 @@ private fun DetailContent(
     contentPadding: PaddingValues = PaddingValues(),
 ) {
     val info = data.info
+    // Resolved once for the whole episode list rather than per row.
+    val badgeContext = LocalContext.current
+    val downloadIndex by EpisodeDownloads.downloads(badgeContext).collectAsState()
+    val exportStatuses by EpisodeExport.statuses(badgeContext).collectAsState()
+    val exportedEpisodes by EpisodeExport.exported(badgeContext).collectAsState()
+    val downloadBadges = remember(downloadIndex, exportStatuses, exportedEpisodes) {
+        episodeDownloadBadges(downloadIndex, exportStatuses, exportedEpisodes)
+    }
     val device = LocalAppDeviceProfile.current
     val episodes = data.episodes
     var selectedTab by remember(info.id) { mutableStateOf(DetailTab.HOME) }
@@ -447,6 +461,11 @@ private fun DetailContent(
                                 episode = episode,
                                 fallbackImage = seasonCover ?: info.bannerImage ?: info.coverImage.best,
                                 watchedFraction = episodeWatchFraction(seasonResume, episode.number),
+                                downloadState = downloadBadges[
+                                    EpisodeDownloads.idFor(info.id, "sub", episode.displayNumber)
+                                ] ?: downloadBadges[
+                                    EpisodeDownloads.idFor(info.id, "dub", episode.displayNumber)
+                                ],
                                 onClick = { playEpisode(episode) },
                                 modifier = if (index == 0) firstItemUp else Modifier,
                             )
@@ -904,6 +923,7 @@ private fun DetailEpisodeRow(
     fallbackImage: String?,
     onClick: () -> Unit,
     watchedFraction: Float = 0f,
+    downloadState: EpisodeDownloadUi? = null,
     modifier: Modifier = Modifier,
 ) {
     val selectedImage = episode.image ?: fallbackImage
@@ -943,6 +963,11 @@ private fun DetailEpisodeRow(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .padding(horizontal = 6.dp, vertical = 5.dp),
+            )
+            DownloadCoverBadge(
+                state = downloadState,
+                modifier = Modifier.matchParentSize().clip(RoundedCornerShape(10.dp)),
+                compact = true,
             )
         }
         Column(Modifier.weight(1f).padding(start = 13.dp)) {

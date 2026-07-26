@@ -17,7 +17,10 @@ object MediaCache {
         instance ?: SimpleCache(
             File(context.applicationContext.cacheDir, "media"),
             LeastRecentlyUsedCacheEvictor(MAX_BYTES),
-            StandaloneDatabaseProvider(context.applicationContext),
+            // Shared with the download index. Both caches live in the same exoplayer_internal.db,
+            // so a second provider means a second SQLiteOpenHelper on one file — duplicated setup
+            // and needless lock contention between playback and downloads.
+            ExoDatabase.provider(context),
         ).also { instance = it }
     }
 

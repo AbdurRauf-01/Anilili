@@ -845,10 +845,15 @@ private fun DownloadDestinationSetting(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(top = 6.dp),
         ) {
+            // The stored default is Device Downloads, which is unreachable before Android 10.
+            // Without this the old device shows every chip unselected, since the stored value maps
+            // to a disabled chip — downloads still behave (the watch screen forces the library),
+            // but the control looks broken.
+            val effectiveSelection = if (deviceDownloadsSupported) selected else DownloadDestination.APP_ONLY
             DownloadDestination.entries.forEach { destination ->
                 val enabled = deviceDownloadsSupported || destination == DownloadDestination.APP_ONLY
                 FilterChip(
-                    selected = selected == destination && enabled,
+                    selected = effectiveSelection == destination && enabled,
                     onClick = { onSelect(destination) },
                     enabled = enabled,
                     label = { Text(destination.label) },

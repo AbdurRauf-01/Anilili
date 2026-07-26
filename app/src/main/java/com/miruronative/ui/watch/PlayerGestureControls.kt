@@ -40,6 +40,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -452,8 +453,8 @@ internal fun MediaVolumeSlider(
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
-    var volume by remember { mutableStateOf(readVolume(audioManager)) }
-    var lastAudible by remember { mutableStateOf(volume.takeIf { it > 0f } ?: 0.5f) }
+    var volume by remember { mutableFloatStateOf(readVolume(audioManager)) }
+    var lastAudible by remember { mutableFloatStateOf(volume.takeIf { it > 0f } ?: 0.5f) }
     var lastInteractMs by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(audioManager) {

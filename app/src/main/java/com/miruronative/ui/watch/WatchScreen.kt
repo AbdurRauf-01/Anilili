@@ -128,7 +128,10 @@ import com.miruronative.playback.BulkDownloadOutcome
 import com.miruronative.playback.BulkEpisodeDownloads
 import com.miruronative.playback.DownloadStorage
 import com.miruronative.playback.EpisodeDownloads
+import com.miruronative.playback.EpisodeDownloadUi
 import com.miruronative.playback.EpisodeExport
+import com.miruronative.playback.episodeDownloadBadges
+import com.miruronative.ui.components.DownloadCoverBadge
 import com.miruronative.playback.OfflineEpisode
 import com.miruronative.playback.offlineEpisodes
 import com.miruronative.playback.PlaybackService
@@ -1160,12 +1163,12 @@ private fun WatchEpisodeSummary(
                     modifier = Modifier.focusHighlight(CircleShape),
                 ) {
                     Icon(
-                        imageVector = if (hasNativeDownloadAction) {
-                            Icons.AutoMirrored.Filled.OpenInNew
-                        } else {
-                            Icons.Default.Download
-                        },
-                        contentDescription = "Open provider download options",
+                        // Always the leaving-the-app icon: this opens the provider's own download
+                        // page in a browser. Showing a download glyph when the app itself cannot
+                        // save the episode (embeds) read as "save offline" and sent people to
+                        // Chrome instead.
+                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = "Open the provider's download page in a browser",
                         tint = MaterialTheme.colorScheme.primary,
                     )
                 }
@@ -1570,6 +1573,15 @@ private fun MobileWatchDetails(
     val pad = device.pagePadding
     val historyEntries by LibraryStore.history.collectAsState()
     val resume = historyEntries.firstOrNull { it.anilistId == data.anilistId }
+    // Every episode row asks the same question, so resolve the three state sources once per list
+    // rather than once per row.
+    val badgeContext = LocalContext.current
+    val downloadIndex by EpisodeDownloads.downloads(badgeContext).collectAsState()
+    val exportStatuses by EpisodeExport.statuses(badgeContext).collectAsState()
+    val exportedEpisodes by EpisodeExport.exported(badgeContext).collectAsState()
+    val downloadBadges = remember(downloadIndex, exportStatuses, exportedEpisodes) {
+        episodeDownloadBadges(downloadIndex, exportStatuses, exportedEpisodes)
+    }
     // Browsing state for long-runners; a null range opens on the block that is playing.
     val episodeLayout by SettingsStore.episodeLayout.collectAsState()
     var episodeQuery by remember(data.anilistId) { mutableStateOf("") }
@@ -1673,6 +1685,9 @@ private fun MobileWatchDetails(
                     fallbackImage = data.artworkUrl,
                     selected = index == data.currentIndex,
                     watchedFraction = episodeWatchFraction(resume, episode.number),
+                    downloadState = downloadBadges[
+                        EpisodeDownloads.idFor(data.anilistId, data.category.api, episode.displayNumber)
+                    ],
                     onClick = { if (index >= 0) onSelectEpisode(index) },
                 )
             }
@@ -1696,6 +1711,7 @@ private fun MobileEpisodeRow(
     selected: Boolean,
     onClick: () -> Unit,
     watchedFraction: Float = 0f,
+    downloadState: EpisodeDownloadUi? = null,
 ) {
     Row(
         modifier = Modifier
@@ -1737,6 +1753,11 @@ private fun MobileEpisodeRow(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .padding(horizontal = 6.dp, vertical = 5.dp),
+            )
+            DownloadCoverBadge(
+                state = downloadState,
+                modifier = Modifier.matchParentSize().clip(RoundedCornerShape(9.dp)),
+                compact = true,
             )
         }
         Column(Modifier.weight(1f).padding(start = 13.dp)) {
@@ -1825,8 +1846,7 @@ private fun SourceSelectors(
         CompactClickablePill(
             label = ProviderCatalog.label(data.provider) +
                 if (data.provider == data.preferredProvider) " ★" else "",
-            downloadable = ProviderCatalog.supportsExternalDownloads(data.provider) ||
-                !data.sources.download.isNullOrBlank(),
+            downloadable = ProviderCatalog.supportsOfflineDownload(data.provider),
             enabled = servers.isNotEmpty(),
             focusRequester = focusRequester,
             onClick = { showServerDialog = true }
@@ -2002,8 +2022,7 @@ private fun SourceSelectors(
                                 rowCells.forEachIndexed { columnIndex, server ->
                                     val selected = server == data.provider
                                     val preferred = server == data.preferredProvider
-                                    val downloadable = ProviderCatalog.supportsExternalDownloads(server) ||
-                                        (server == data.provider && !data.sources.download.isNullOrBlank())
+                                    val downloadable = ProviderCatalog.supportsOfflineDownload(server)
                                     val bg = when {
                                         selected -> MaterialTheme.colorScheme.primary
                                         else -> MaterialTheme.colorScheme.surfaceVariant
@@ -2071,7 +2090,7 @@ private fun SourceSelectors(
                                                 if (downloadable) {
                                                     Icon(
                                                         Icons.Default.Download,
-                                                        contentDescription = "Download available",
+                                                        contentDescription = "Can be saved offline",
                                                         tint = if (selected) textColor else MaterialTheme.colorScheme.primary,
                                                         modifier = Modifier.size(14.dp),
                                                     )
@@ -2211,8 +2230,7 @@ private fun MobileServerPickerContent(
                     rowServers.forEach { server ->
                         val selected = server == data.provider
                         val preferred = server == data.preferredProvider
-                        val downloadable = ProviderCatalog.supportsExternalDownloads(server) ||
-                            (server == data.provider && !data.sources.download.isNullOrBlank())
+                        val downloadable = ProviderCatalog.supportsOfflineDownload(server)
                         val textColor = if (selected) MaterialTheme.colorScheme.onPrimary
                             else MaterialTheme.colorScheme.onSurface
                         Column(
@@ -2258,7 +2276,7 @@ private fun MobileServerPickerContent(
                                 if (downloadable) {
                                     Icon(
                                         Icons.Default.Download,
-                                        contentDescription = "Download available",
+                                        contentDescription = "Can be saved offline",
                                         tint = if (selected) {
                                             MaterialTheme.colorScheme.onPrimary
                                         } else {
@@ -2359,7 +2377,7 @@ private fun CompactClickablePill(
         if (downloadable) {
             Icon(
                 Icons.Default.Download,
-                contentDescription = "Download available",
+                contentDescription = "Can be saved offline",
                 tint = if (active) {
                     MaterialTheme.colorScheme.onPrimary
                 } else {

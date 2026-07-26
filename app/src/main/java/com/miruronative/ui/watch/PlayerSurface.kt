@@ -40,6 +40,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -538,7 +539,7 @@ fun PlayerSurface(
     var controllerVisible by remember { mutableStateOf(false) }
     var tvControlsVisible by remember { mutableStateOf(false) }
     var tvControlsInteraction by remember { mutableIntStateOf(0) }
-    var lastAudibleVolume by remember { mutableStateOf(1f) }
+    var lastAudibleVolume by remember { mutableFloatStateOf(1f) }
     val tvPlayPauseFocus = remember { FocusRequester() }
     val tvPlayerFocus = remember { FocusRequester() }
     var tvControlsFocusRestoreRequest by remember(activeStream.url) { mutableIntStateOf(0) }
@@ -706,7 +707,7 @@ fun PlayerSurface(
         changeVideoHeight(activeController, target)
     }
     // The speed to restore once a hold-for-2x gesture ends (the user's chosen playback speed).
-    var preHoldSpeed by remember { mutableStateOf(1f) }
+    var preHoldSpeed by remember { mutableFloatStateOf(1f) }
     var playbackGestureIsPlaying by remember { mutableStateOf<Boolean?>(null) }
     val autoSkipIntroOutro by SettingsStore.autoSkipIntroOutro.collectAsState()
     val autoplay by SettingsStore.autoplay.collectAsState()

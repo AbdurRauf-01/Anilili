@@ -26,13 +26,26 @@ class EpisodeDownloadsTest {
         val direct = stream("https://cdn.example/episode.mp4", "video/mp4")
         assertTrue(EpisodeDownloads.canDownload(direct))
         assertTrue(EpisodeDownloads.canSaveToDevice(direct))
-        assertFalse(EpisodeDownloads.canSaveToDevice(stream("https://cdn.example/master.m3u8", "hls")))
         assertFalse(EpisodeDownloads.canDownload(stream("https://cdn.example/episode.mpd", "dash")))
         assertFalse(
             EpisodeDownloads.canDownload(
                 stream("https://flixcloud.example/master.m3u8", "hls", playlistKey = "secret"),
             ),
         )
+    }
+
+    @Test
+    fun `anything downloadable can also reach the downloads folder`() {
+        // Every device copy is built by downloading first and rewrapping after, so the two sets
+        // are the same. Streams the player has to rewrite, and embeds, are in neither.
+        assertTrue(EpisodeDownloads.canSaveToDevice(stream("https://cdn.example/master.m3u8", "hls")))
+        assertTrue(EpisodeDownloads.canSaveToDevice(stream("https://cdn.example/episode.mkv", "mkv")))
+        assertFalse(
+            EpisodeDownloads.canSaveToDevice(
+                stream("https://flixcloud.example/master.m3u8", "hls", playlistKey = "secret"),
+            ),
+        )
+        assertFalse(EpisodeDownloads.canSaveToDevice(stream("https://embed.example/watch/1", "embed")))
     }
 
     private fun stream(

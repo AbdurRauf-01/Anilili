@@ -35,8 +35,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.miruronative.data.model.StreamItem
+import com.miruronative.data.model.SubtitleItem
 import com.miruronative.playback.EpisodeDownloadState
 import com.miruronative.playback.EpisodeDownloads
+import com.miruronative.playback.EpisodeExport
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
@@ -52,7 +54,9 @@ fun DownloadedEpisodeScreen(
     val activity = remember(context) { context.findActivity() }
     val device = LocalAppDeviceProfile.current
     val downloads by EpisodeDownloads.downloads(context).collectAsState()
+    val exported by EpisodeExport.exported(context).collectAsState()
     val download = downloads.firstOrNull { it.id == downloadId }
+    val exportedEpisode = exported.firstOrNull { it.downloadId == downloadId }
     var playbackError by remember(downloadId) { mutableStateOf<String?>(null) }
     val leave = {
         PlaybackService.pauseActivePlayback()
@@ -91,40 +95,70 @@ fun DownloadedEpisodeScreen(
         }
     }
 
+    // Either copy will do. The cached download is preferred when both exist, because that is the
+    // one the player already knows how to seek through with its persisted stream keys; an exported
+    // MP4 is a plain content:// file, which the playback chain resolves through DefaultDataSource.
+    val playable = remember(download, exportedEpisode) {
+        when {
+            download?.isComplete == true -> PlayableEpisode(
+                stream = StreamItem(
+                    url = download.uri,
+                    type = if (download.isAdaptive) "hls" else "mp4",
+                    quality = "Downloaded",
+                    audio = download.metadata.category,
+                    referer = download.metadata.referer,
+                    isActive = true,
+                    width = null,
+                    height = null,
+                    headers = download.metadata.headers,
+                ),
+                subtitles = EpisodeDownloads.localSubtitles(context, download.metadata),
+                metadata = download.metadata,
+            )
+            exportedEpisode != null -> PlayableEpisode(
+                stream = StreamItem(
+                    url = exportedEpisode.uri,
+                    type = "mp4",
+                    quality = "Downloaded",
+                    audio = exportedEpisode.metadata.category,
+                    referer = null,
+                    isActive = true,
+                    width = null,
+                    height = null,
+                ),
+                subtitles = exportedEpisode.subtitles.map {
+                    SubtitleItem(url = it.uri, label = it.label, language = it.language)
+                },
+                metadata = exportedEpisode.metadata,
+            )
+            else -> null
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when {
-            download == null -> DownloadMessage(
-                title = "Download not found",
-                message = "It may have been removed from this device.",
-            )
-            download.state != EpisodeDownloadState.COMPLETED -> DownloadMessage(
-                title = "Episode is not ready",
-                message = when (download.state) {
-                    EpisodeDownloadState.FAILED -> "The download failed. Remove it and try again from the watch page."
-                    EpisodeDownloadState.REMOVING -> "This episode is being removed."
-                    else -> download.percent?.let { "Downloaded ${it.toInt()}%." }
-                        ?: "The download is still in progress."
-                },
-            )
             playbackError != null -> DownloadMessage(
                 title = "Could not play download",
                 message = playbackError.orEmpty(),
             )
+            playable == null && download == null -> DownloadMessage(
+                title = "Download not found",
+                message = "It may have been removed from this device.",
+            )
+            playable == null -> DownloadMessage(
+                title = "Episode is not ready",
+                message = when (download?.state) {
+                    EpisodeDownloadState.FAILED -> "The download failed. Remove it and try again from the watch page."
+                    EpisodeDownloadState.REMOVING -> "This episode is being removed."
+                    else -> download?.percent?.let { "Downloaded ${it.toInt()}%." }
+                        ?: "The download is still in progress."
+                },
+            )
             else -> {
-                val metadata = download.metadata
+                val metadata = playable.metadata
                 PlayerSurface(
-                    stream = StreamItem(
-                        url = download.uri,
-                        type = "hls",
-                        quality = "Downloaded",
-                        audio = metadata.category,
-                        referer = metadata.referer,
-                        isActive = true,
-                        width = null,
-                        height = null,
-                        headers = metadata.headers,
-                    ),
-                    subtitles = EpisodeDownloads.localSubtitles(context, metadata),
+                    stream = playable.stream,
+                    subtitles = playable.subtitles,
                     skip = null,
                     seriesTitle = metadata.seriesTitle,
                     episodeTitle = metadata.episodeTitle?.takeIf(String::isNotBlank)
@@ -142,7 +176,7 @@ fun DownloadedEpisodeScreen(
                     hasPreviousEpisode = false,
                     focusPlayerOnStart = true,
                     isFullscreen = true,
-                    notificationRoute = Routes.download(download.id),
+                    notificationRoute = Routes.download(downloadId),
                 )
             }
         }
@@ -163,6 +197,13 @@ fun DownloadedEpisodeScreen(
         }
     }
 }
+
+/** Whichever on-device copy of an episode the player is going to open. */
+private data class PlayableEpisode(
+    val stream: StreamItem,
+    val subtitles: List<SubtitleItem>,
+    val metadata: com.miruronative.playback.EpisodeDownloadMetadata,
+)
 
 @Composable
 private fun DownloadMessage(title: String, message: String) {

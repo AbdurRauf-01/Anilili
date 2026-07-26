@@ -139,6 +139,7 @@ dependencies {
     implementation(libs.androidx.media3.datasource.cronet)
     implementation(libs.androidx.media3.database)
     implementation(libs.androidx.media3.cast)
+    implementation(libs.androidx.media3.transformer)
     implementation(libs.play.services.cronet)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.webkit)

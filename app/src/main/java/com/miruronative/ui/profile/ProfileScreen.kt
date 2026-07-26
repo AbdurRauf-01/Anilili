@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -93,6 +94,11 @@ import com.miruronative.ui.components.ScrollAwareTopBar
 import com.miruronative.playback.EpisodeDownload
 import com.miruronative.playback.EpisodeDownloadState
 import com.miruronative.playback.EpisodeDownloads
+import com.miruronative.playback.EpisodeExport
+import com.miruronative.playback.EpisodeExportState
+import com.miruronative.playback.EpisodeExportStatus
+import com.miruronative.playback.OfflineEpisode
+import com.miruronative.playback.offlineEpisodes
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -156,7 +162,13 @@ fun ProfileScreen(
     val profileState by vm.profile.collectAsState()
     val history by LibraryStore.history.collectAsState()
     val watchlist by LibraryStore.watchlist.collectAsState()
-    val episodeDownloads by EpisodeDownloads.downloads(context).collectAsState()
+    val downloadIndex by EpisodeDownloads.downloads(context).collectAsState()
+    val exportedEpisodes by EpisodeExport.exported(context).collectAsState()
+    val exportStatuses by EpisodeExport.statuses(context).collectAsState()
+    // One card per episode whether it is held as cached segments, as an MP4 in Downloads, or both.
+    val episodeDownloads = remember(downloadIndex, exportedEpisodes) {
+        offlineEpisodes(downloadIndex, exportedEpisodes)
+    }
     val isRefreshing by vm.isRefreshing.collectAsState()
     var loginService by remember { mutableStateOf<AccountService?>(null) }
     var selectedViewName by rememberSaveable { mutableStateOf(LibraryView.WATCHLIST.name) }
@@ -390,11 +402,13 @@ fun ProfileScreen(
                                     .padding(horizontal = device.pagePadding, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                for (download in row) {
+                                for (episode in row) {
                                     EpisodeDownloadCard(
-                                        download = download,
-                                        onPlay = { onPlayDownload(download.id) },
-                                        onRemove = { EpisodeDownloads.remove(context, download.id) },
+                                        episode = episode,
+                                        exportStatus = exportStatuses[episode.id],
+                                        onPlay = { onPlayDownload(episode.id) },
+                                        onRemove = { removeOfflineEpisode(context, episode) },
+                                        onExport = { EpisodeExport.request(context, episode.id) },
                                         modifier = Modifier.weight(1f),
                                     )
                                 }
@@ -410,11 +424,13 @@ fun ProfileScreen(
                                 contentPadding = PaddingValues(horizontal = device.pagePadding),
                                 horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 12.dp),
                             ) {
-                                items(episodeDownloads, key = EpisodeDownload::id) { download ->
+                                items(episodeDownloads, key = OfflineEpisode::id) { episode ->
                                     EpisodeDownloadCard(
-                                        download = download,
-                                        onPlay = { onPlayDownload(download.id) },
-                                        onRemove = { EpisodeDownloads.remove(context, download.id) },
+                                        episode = episode,
+                                        exportStatus = exportStatuses[episode.id],
+                                        onPlay = { onPlayDownload(episode.id) },
+                                        onRemove = { removeOfflineEpisode(context, episode) },
+                                        onExport = { EpisodeExport.request(context, episode.id) },
                                     )
                                 }
                             }
@@ -734,11 +750,15 @@ private fun ProfileSectionTitle(
 
 @Composable
 private fun EpisodeDownloadCard(
-    download: EpisodeDownload,
+    episode: OfflineEpisode,
+    exportStatus: EpisodeExportStatus?,
     onPlay: () -> Unit,
     onRemove: () -> Unit,
+    onExport: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val download = episode.download
+    val metadata = episode.metadata
     val device = LocalAppDeviceProfile.current
     val shape = RoundedCornerShape(12.dp)
     val cardModifier = if (modifier != Modifier) {
@@ -760,8 +780,8 @@ private fun EpisodeDownloadCard(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
             ) {
                 AsyncImage(
-                    model = download.metadata.artworkUrl,
-                    contentDescription = download.metadata.seriesTitle,
+                    model = metadata.artworkUrl,
+                    contentDescription = metadata.seriesTitle,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
                 )
@@ -776,13 +796,13 @@ private fun EpisodeDownloadCard(
                         ),
                 )
                 Text(
-                    "EP ${download.metadata.episodeNumber} · ${download.metadata.category.uppercase()}",
+                    "EP ${metadata.episodeNumber} · ${metadata.category.uppercase()}",
                     color = Color.White,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.align(Alignment.BottomStart).padding(10.dp),
                 )
-                if (download.isComplete) {
+                if (episode.isPlayable) {
                     Icon(
                         Icons.Default.CheckCircle,
                         contentDescription = "Downloaded",
@@ -796,44 +816,89 @@ private fun EpisodeDownloadCard(
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Text(
-                    download.metadata.seriesTitle,
+                    metadata.seriesTitle,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    download.metadata.episodeTitle?.takeIf(String::isNotBlank)
-                        ?: "Episode ${download.metadata.episodeNumber}",
+                    metadata.episodeTitle?.takeIf(String::isNotBlank)
+                        ?: "Episode ${metadata.episodeNumber}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (download.isActive) {
+                if (episode.isDownloading) {
                     LinearProgressIndicator(
-                        progress = { (download.percent ?: 0f) / 100f },
+                        progress = { (download?.percent ?: 0f) / 100f },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
                 Text(
                     listOfNotNull(
-                        download.state.displayLabel(download.percent),
-                        download.bytesDownloaded.takeIf { it > 0 }?.let(::formatDownloadBytes),
+                        // An episode that only exists as an MP4 has no Media3 download state left
+                        // to report, so say where it lives instead.
+                        download?.state?.displayLabel(download.percent) ?: "In Downloads folder",
+                        episode.sizeBytes.takeIf { it > 0 }?.let(::formatDownloadBytes),
                     ).joinToString(" · "),
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (download.state == EpisodeDownloadState.FAILED) {
+                    color = if (download?.state == EpisodeDownloadState.FAILED) {
                         MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
                 )
+                // A completed export is already spelled out by the status line above once the
+                // library copy is gone; only say it twice while both copies exist.
+                if (exportStatus != null && !(exportStatus.state == EpisodeExportState.COMPLETED && download == null)) {
+                    if (exportStatus.state == EpisodeExportState.RUNNING) {
+                        LinearProgressIndicator(
+                            progress = { (exportStatus.percent ?: 0) / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Text(
+                        when (exportStatus.state) {
+                            EpisodeExportState.PENDING -> "Queued for Downloads"
+                            EpisodeExportState.RUNNING -> exportStatus.percent
+                                ?.let { "Building MP4 · $it%" }
+                                ?: "Building MP4…"
+                            EpisodeExportState.COMPLETED -> "Saved to Downloads"
+                            EpisodeExportState.FAILED ->
+                                exportStatus.error ?: "Could not save to Downloads"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (exportStatus.state == EpisodeExportState.FAILED) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (download.isComplete) {
+                    if (episode.isPlayable) {
+                        // Offered per episode rather than only at download time, so one already
+                        // sitting in the library can be lifted out to Downloads later.
+                        if (
+                            EpisodeExport.isSupported &&
+                            download?.isComplete == true &&
+                            !episode.isInDownloadsFolder
+                        ) {
+                            TextButton(
+                                onClick = onExport,
+                                enabled = exportStatus == null ||
+                                    exportStatus.state == EpisodeExportState.FAILED,
+                            ) {
+                                Icon(Icons.Default.SaveAlt, contentDescription = null)
+                                Text("MP4", modifier = Modifier.padding(start = 4.dp))
+                            }
+                        }
                         TextButton(onClick = onPlay) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null)
                             Text("Play", modifier = Modifier.padding(start = 4.dp))
@@ -852,6 +917,16 @@ private fun EpisodeDownloadCard(
             }
         }
     }
+}
+
+/**
+ * Removes an episode from the offline library completely, whichever copies of it exist — the
+ * cached segments, the MP4 in Downloads, or both. Deleting only half of it would leave a card
+ * behind that still looks downloaded.
+ */
+private fun removeOfflineEpisode(context: android.content.Context, episode: OfflineEpisode) {
+    if (episode.download != null) EpisodeDownloads.remove(context, episode.id)
+    if (episode.exported != null) EpisodeExport.deleteExported(context, episode.id)
 }
 
 @OptIn(ExperimentalFoundationApi::class)

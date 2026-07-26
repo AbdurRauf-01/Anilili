@@ -96,6 +96,11 @@ data class EpisodeDownload(
     val updatedAtMs: Long,
 ) {
     val isComplete: Boolean get() = state == EpisodeDownloadState.COMPLETED
+
+    /** Adaptive downloads are a manifest plus segments; direct ones are already a single file. */
+    val isAdaptive: Boolean get() = metadata.streamType?.equals("hls", true)
+        ?: uri.contains(".m3u8", ignoreCase = true)
+
     val isActive: Boolean get() = state in setOf(
         EpisodeDownloadState.QUEUED,
         EpisodeDownloadState.DOWNLOADING,
@@ -187,6 +192,9 @@ object EpisodeDownloads {
             initialized = true
             refreshDownloads()
             DiagnosticsLog.event("EpisodeDownloads initialized")
+            // Safe to call from inside the lock: this object is already flagged initialized, so
+            // the export observer's own call back into here returns before reaching it.
+            EpisodeExport.initialize(appContext)
         }
     }
 
@@ -223,8 +231,19 @@ object EpisodeDownloads {
             stream.playlistKey == null &&
             (stream.isHls || stream.isDirectFile())
 
-    fun canSaveToDevice(stream: StreamItem?): Boolean =
-        stream != null && stream.playlistKey == null && stream.isDirectFile()
+    /**
+     * Whether the Downloads folder can receive this episode — the same set as [canDownload],
+     * because everything now reaches it the same way: into the library cache first, then rewrapped
+     * into a single MP4 by [EpisodeExport].
+     *
+     * Handing direct files to the system downloader instead would be one pass rather than two, but
+     * it produces a file the app has no record of (and leaves .mkv/.webm sources unconverted), so
+     * the episode would vanish from the offline library. One route keeps the library honest.
+     *
+     * Callers must still check for Android 10, which is where MediaStore's Downloads collection
+     * arrived.
+     */
+    fun canSaveToDevice(stream: StreamItem?): Boolean = canDownload(stream)
 
     /**
      * Prepares the adaptive manifest first so Media3 records the selected HLS stream keys instead
@@ -334,71 +353,6 @@ object EpisodeDownloads {
         })
     }
 
-    /**
-     * Sends a direct video file to Android's public Downloads collection. Adaptive HLS is excluded:
-     * it is a bundle of manifests and segments rather than one file another player can open.
-     */
-    @android.annotation.SuppressLint("NewApi")
-    fun enqueueDeviceDownload(
-        context: Context,
-        metadata: EpisodeDownloadMetadata,
-        stream: StreamItem,
-    ): Result<Long> = runCatching {
-        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            "Device Downloads requires Android 10 or newer"
-        }
-        require(canSaveToDevice(stream)) {
-            "Only direct video files can be saved to Device Downloads"
-        }
-        initialize(context)
-        val app = context.applicationContext
-        val format = directFileFormat(stream)
-        // Each series gets its own folder under Downloads/Anilili. A long-runner otherwise buries
-        // everything else in the same flat list, and the file manager has no way to group them.
-        val seriesFolder = safeFilePart(metadata.seriesTitle).take(80).trim()
-        val fileName = uniqueDeviceFileName(
-            context = app,
-            seriesFolder = seriesFolder,
-            stem = buildString {
-                append("Episode ")
-                append(safeFilePart(metadata.episodeNumber))
-                metadata.episodeTitle
-                    ?.takeIf(String::isNotBlank)
-                    ?.let { append(" - ").append(safeFilePart(it)) }
-                stream.label.takeIf { it.isNotBlank() && !it.equals("auto", true) }
-                    ?.let { append(" [").append(safeFilePart(it)).append(']') }
-            }.take(180).trim(),
-            extension = format.extension,
-        )
-        val request = android.app.DownloadManager.Request(Uri.parse(stream.url))
-            .setTitle("${metadata.seriesTitle} · Episode ${metadata.episodeNumber}")
-            .setDescription("${metadata.provider} · ${stream.label}")
-            .setMimeType(format.mimeType)
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-            .setNotificationVisibility(
-                android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED,
-            )
-            .setDestinationInExternalPublicDir(
-                Environment.DIRECTORY_DOWNLOADS,
-                "$PUBLIC_DOWNLOAD_SUBDIRECTORY/$seriesFolder/$fileName",
-            )
-        (requestHeaders(metadata) + ("User-Agent" to userAgent)).forEach { (name, value) ->
-            if (name.isNotBlank() && value.isNotBlank() && '\n' !in value && '\r' !in value) {
-                request.addRequestHeader(name, value)
-            }
-        }
-        val systemManager = app.getSystemService(Context.DOWNLOAD_SERVICE)
-            as? android.app.DownloadManager
-            ?: error("Android Download Manager is unavailable")
-        systemManager.enqueue(request).also { systemId ->
-            DiagnosticsLog.event(
-                "Device episode download queued systemId=$systemId provider=${metadata.provider} " +
-                    "file=$fileName host=${Uri.parse(stream.url).host ?: "unknown"}",
-            )
-        }
-    }
-
     fun remove(context: Context, id: String) {
         initialize(context)
         DownloadService.sendRemoveDownload(
@@ -425,6 +379,38 @@ object EpisodeDownloads {
                 language = subtitle.language,
             )
         }
+    }
+
+    /** The on-disk subtitle files for a download, paired with their entry, for sidecar export. */
+    internal fun subtitleFiles(
+        context: Context,
+        metadata: EpisodeDownloadMetadata,
+    ): List<Pair<EpisodeDownloadSubtitle, File>> {
+        initialize(context)
+        val directory = subtitleDirectory()
+        return metadata.subtitles.mapNotNull { subtitle ->
+            val fileName = subtitle.fileName ?: return@mapNotNull null
+            val file = File(directory, fileName).takeIf(File::isFile) ?: return@mapNotNull null
+            subtitle to file
+        }
+    }
+
+    /** Filename-safe tag for a subtitle sidecar, e.g. `Episode 3 [1080p].en.vtt`. */
+    internal fun subtitleTag(subtitle: EpisodeDownloadSubtitle): String {
+        val raw = subtitle.language.takeIf(String::isNotBlank)
+            ?: subtitle.label.takeIf(String::isNotBlank)
+            ?: "sub"
+        return safeFilePart(raw).replace(' ', '-')
+    }
+
+    /**
+     * Reads the download cache first and only falls back to the network for anything missing, with
+     * the provider's header profile still applied. That is what lets an export run entirely
+     * offline once the download itself is complete.
+     */
+    internal fun exportDataSourceFactory(context: Context): DataSource.Factory {
+        initialize(context)
+        return readOnlyPlaybackFactory(context, upstreamFactory)
     }
 
     /**
@@ -656,14 +642,35 @@ object EpisodeDownloads {
             .trim('.', ' ')
             .ifBlank { "Episode" }
 
+    /**
+     * Each series gets its own folder under Downloads/Anilili. A long-runner otherwise buries
+     * everything else in the same flat list, and the file manager has no way to group them.
+     */
+    internal fun deviceSeriesFolder(metadata: EpisodeDownloadMetadata): String =
+        safeFilePart(metadata.seriesTitle).take(80).trim()
+
+    internal fun deviceRelativePath(seriesFolder: String): String =
+        "${Environment.DIRECTORY_DOWNLOADS}/$PUBLIC_DOWNLOAD_SUBDIRECTORY/$seriesFolder/"
+
+    internal fun deviceFileStem(metadata: EpisodeDownloadMetadata): String = buildString {
+        val qualityLabel = metadata.quality
+        append("Episode ")
+        append(safeFilePart(metadata.episodeNumber))
+        metadata.episodeTitle
+            ?.takeIf(String::isNotBlank)
+            ?.let { append(" - ").append(safeFilePart(it)) }
+        qualityLabel?.takeIf { it.isNotBlank() && !it.equals("auto", true) }
+            ?.let { append(" [").append(safeFilePart(it)).append(']') }
+    }.take(180).trim()
+
     @android.annotation.TargetApi(Build.VERSION_CODES.Q)
-    private fun uniqueDeviceFileName(
+    internal fun uniqueDeviceFileName(
         context: Context,
         seriesFolder: String,
         stem: String,
         extension: String,
     ): String {
-        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$PUBLIC_DOWNLOAD_SUBDIRECTORY/$seriesFolder/"
+        val relativePath = deviceRelativePath(seriesFolder)
         var copy = 1
         while (copy <= 999) {
             val suffix = if (copy == 1) "" else " ($copy)"

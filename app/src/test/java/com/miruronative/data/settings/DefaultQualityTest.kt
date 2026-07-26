@@ -58,6 +58,7 @@ class DefaultQualityTest {
         DownloadDestination.entries.forEach { destination ->
             assertEquals(destination, DownloadDestination.fromStored(destination.storedValue))
         }
-        assertEquals(DownloadDestination.APP_ONLY, DownloadDestination.fromStored(null))
+        // Unset means "give me an MP4 in Downloads": cache-only segments are useless outside the app.
+        assertEquals(DownloadDestination.DEVICE_ONLY, DownloadDestination.fromStored(null))
     }
 }

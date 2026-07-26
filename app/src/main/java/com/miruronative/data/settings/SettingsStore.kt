@@ -91,7 +91,12 @@ enum class DownloadQuality(
     }
 }
 
-/** Where a direct-file episode should be saved. HLS always remains in the offline library. */
+/**
+ * Where a downloaded episode ends up.
+ *
+ * Downloads-folder copies are always built from a library download that is then rewrapped into a
+ * single MP4, so `DEVICE_ONLY` does not skip the library — it drops the cached copy afterwards.
+ */
 enum class DownloadDestination(val storedValue: String, val label: String) {
     APP_ONLY("app", "Anilili library"),
     DEVICE_ONLY("device", "Device Downloads"),
@@ -101,8 +106,14 @@ enum class DownloadDestination(val storedValue: String, val label: String) {
     val includesDevice: Boolean get() = this != APP_ONLY
 
     companion object {
+        /**
+         * Downloads become an MP4 in the device's Downloads folder unless the viewer says
+         * otherwise: an episode that only exists as Media3 cache segments is useful to this app
+         * and nothing else, and the offline library keeps working either way because it plays the
+         * exported file directly.
+         */
         fun fromStored(value: String?): DownloadDestination =
-            entries.firstOrNull { it.storedValue == value } ?: APP_ONLY
+            entries.firstOrNull { it.storedValue == value } ?: DEVICE_ONLY
     }
 }
 
@@ -174,7 +185,7 @@ object SettingsStore {
     private val _downloadQuality = MutableStateFlow(DownloadQuality.BEST)
     val downloadQuality = _downloadQuality.asStateFlow()
 
-    private val _downloadDestination = MutableStateFlow(DownloadDestination.APP_ONLY)
+    private val _downloadDestination = MutableStateFlow(DownloadDestination.DEVICE_ONLY)
     val downloadDestination = _downloadDestination.asStateFlow()
 
     // Set once and expected to stick: the viewer who wants dense number chips for a long-runner

@@ -831,9 +831,11 @@ private fun DownloadDestinationSetting(
         )
         Text(
             if (deviceDownloadsSupported) {
-                "Device Downloads and Both are offered for direct MP4 sources. HLS stays in Anilili."
+                "Device Downloads rewraps each episode into one MP4 under Downloads/Anilili and " +
+                    "drops the cached copy. Both keeps the cached copy as well, at roughly double " +
+                    "the storage."
             } else {
-                "Public device downloads require Android 10 or newer. HLS stays in Anilili."
+                "Public device downloads require Android 10 or newer, so episodes stay in Anilili."
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

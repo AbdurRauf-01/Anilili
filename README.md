@@ -46,6 +46,9 @@ streams play with ExoPlayer; embed providers and fallback playback use WebView.
 - Native HLS playback with subtitles, skip intro, and auto advance.
 - Background native-HLS episode downloads with external subtitle tracks, progress, offline
   playback, and removal from the Library screen.
+- Downloads are rewrapped into a single MP4 under `Downloads/Anilili/<series>/`, with subtitles
+  saved beside them. The rewrap is a transmux, not a re-encode, and reads the segments already on
+  disk, so it needs no network. The Library plays the exported file directly.
 - Miruro provider download options, with source badges showing which servers expose them.
 - WebView playback for embed providers and fallback player routes.
 - AniList or MyAnimeList login with watching, planning, paused, and completed list views.

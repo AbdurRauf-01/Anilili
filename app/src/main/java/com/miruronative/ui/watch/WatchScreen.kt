@@ -128,6 +128,9 @@ import com.miruronative.playback.BulkDownloadOutcome
 import com.miruronative.playback.BulkEpisodeDownloads
 import com.miruronative.playback.DownloadStorage
 import com.miruronative.playback.EpisodeDownloads
+import com.miruronative.playback.EpisodeExport
+import com.miruronative.playback.OfflineEpisode
+import com.miruronative.playback.offlineEpisodes
 import com.miruronative.playback.PlaybackService
 import com.miruronative.data.settings.DownloadDestination
 import com.miruronative.data.settings.DownloadQuality
@@ -401,6 +404,7 @@ private fun WatchContent(
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
     val downloads by EpisodeDownloads.downloads(context).collectAsState()
+    val exportedEpisodes by EpisodeExport.exported(context).collectAsState()
     val preparingIds by EpisodeDownloads.preparingIds.collectAsState()
     val downloadId = EpisodeDownloads.idFor(
         data.anilistId,
@@ -425,14 +429,25 @@ private fun WatchContent(
     var downloadBatchSize by remember { mutableIntStateOf(1) }
     // Everything from the current episode onward that is not already saved — the batch a viewer
     // starting partway through actually wants, rather than re-fetching what they have.
-    val remainingEpisodes = remember(data.episodes, data.current.number, data.anilistId, data.category, downloads) {
+    val remainingEpisodes = remember(
+        data.episodes,
+        data.current.number,
+        data.anilistId,
+        data.category,
+        downloads,
+        exportedEpisodes,
+    ) {
         BulkEpisodeDownloads.pendingEpisodes(
             episodes = data.episodes,
             anilistId = data.anilistId,
             category = data.category.api,
             fromNumber = data.current.number,
-            alreadyHave = downloads.filter { it.state == EpisodeDownloadState.COMPLETED }
-                .map { it.id }.toSet(),
+            // Exported episodes count as held too. With the cache copy dropped after conversion,
+            // going by the download index alone would offer to re-fetch a season already saved.
+            alreadyHave = offlineEpisodes(downloads, exportedEpisodes)
+                .filter(OfflineEpisode::isPlayable)
+                .map(OfflineEpisode::id)
+                .toSet(),
         )
     }
     var selectedDownloadDestination by remember { mutableStateOf(defaultDownloadDestination) }
@@ -484,17 +499,23 @@ private fun WatchContent(
             )
             val appDownloadCanStart = episodeDownload == null ||
                 episodeDownload.state == EpisodeDownloadState.FAILED
+            // Downloads-folder copies always come from a library download that is then rewrapped,
+            // so the cache download runs even when the viewer asked for Downloads alone.
+            val exportsToDevice = effectiveDestination.includesDevice
+            val needsAppDownload = effectiveDestination.includesApp || exportsToDevice
             val enqueue = {
-                val deviceResult = if (effectiveDestination.includesDevice) {
-                    EpisodeDownloads.enqueueDeviceDownload(
+                if (exportsToDevice) {
+                    EpisodeExport.request(
                         context = context,
-                        metadata = metadata,
-                        stream = selectedStream,
+                        downloadId = downloadId,
+                        // "Device Downloads" means don't leave behind a library copy *this action*
+                        // created. An episode that was already in the library stays there — the
+                        // dialog preselects this destination for those, and silently deleting a
+                        // download the viewer already had is not what they asked for.
+                        deleteAppCopyAfter = !effectiveDestination.includesApp && appDownloadCanStart,
                     )
-                } else {
-                    null
                 }
-                if (effectiveDestination.includesApp && appDownloadCanStart) {
+                if (needsAppDownload && appDownloadCanStart) {
                     EpisodeDownloads.enqueue(
                         context = context,
                         metadata = metadata,
@@ -502,28 +523,22 @@ private fun WatchContent(
                         quality = quality,
                     ) { appResult ->
                         val message = when {
-                            appResult.isSuccess && deviceResult?.isSuccess == true ->
-                                "Episode added to Anilili and Device Downloads."
-                            appResult.isSuccess && deviceResult?.isFailure == true ->
-                                "Added to Anilili. Device copy failed: " +
-                                    (deviceResult.exceptionOrNull()?.message ?: "unknown error")
-                            appResult.isSuccess -> "Episode added to Anilili downloads."
-                            deviceResult?.isSuccess == true ->
-                                "Device download started, but the Anilili copy failed: " +
-                                    (appResult.exceptionOrNull()?.message ?: "unknown error")
-                            else -> appResult.exceptionOrNull()?.message
-                                ?: deviceResult?.exceptionOrNull()?.message
+                            appResult.isFailure -> appResult.exceptionOrNull()?.message
                                 ?: "Could not start the download."
+                            exportsToDevice && effectiveDestination.includesApp ->
+                                "Episode added to Anilili. The MP4 is written to Downloads once it finishes."
+                            exportsToDevice ->
+                                "Downloading now. The MP4 is written to Downloads once it finishes."
+                            else -> "Episode added to Anilili downloads."
                         }
                         Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                     }
                 } else {
                     val message = when {
-                        deviceResult?.isSuccess == true && effectiveDestination.includesApp ->
-                            "Device download started. This episode is already in Anilili."
-                        deviceResult?.isSuccess == true -> "Episode added to Device Downloads."
-                        deviceResult?.isFailure == true ->
-                            deviceResult.exceptionOrNull()?.message ?: "Could not start the device download."
+                        exportsToDevice && episodeDownload?.isComplete == true ->
+                            "Saving this episode to Downloads as MP4."
+                        exportsToDevice ->
+                            "Already downloading. The MP4 follows once it finishes."
                         effectiveDestination.includesApp -> "This episode is already in Anilili downloads."
                         else -> "Could not start the download."
                     }
@@ -531,7 +546,7 @@ private fun WatchContent(
                 }
             }
             if (
-                effectiveDestination.includesApp &&
+                needsAppDownload &&
                 appDownloadCanStart &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -569,6 +584,7 @@ private fun WatchContent(
             destination = selectedDownloadDestination,
             canSaveToDevice = canSaveToDevice,
             alreadyInApp = episodeDownload?.state == EpisodeDownloadState.COMPLETED,
+            alreadyInDownloads = exportedEpisodes.any { it.downloadId == downloadId },
             onQualityChange = { selectedDownloadQuality = it },
             onDestinationChange = { selectedDownloadDestination = it },
             batchSize = downloadBatchSize,
@@ -1273,6 +1289,7 @@ private fun EpisodeDownloadDialog(
     destination: DownloadDestination,
     canSaveToDevice: Boolean,
     alreadyInApp: Boolean,
+    alreadyInDownloads: Boolean,
     onQualityChange: (DownloadQuality) -> Unit,
     onDestinationChange: (DownloadDestination) -> Unit,
     batchSize: Int,
@@ -1348,6 +1365,17 @@ private fun EpisodeDownloadDialog(
                             )
                         }
                     }
+                    // Worth spelling out: a device-only download still shows up in the library
+                    // while it runs, because the MP4 is built from that copy afterwards.
+                    if (destination.includesDevice) {
+                        Text(
+                            "Episodes download to the library first, then get rewrapped into one MP4 " +
+                                "under Downloads/Anilili — no re-encoding, and subtitles are saved alongside it.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                     if (alreadyInApp) {
                         Text(
                             "This episode is already in the Anilili offline library. You can still add a device copy.",
@@ -1356,13 +1384,19 @@ private fun EpisodeDownloadDialog(
                             modifier = Modifier.padding(top = 4.dp),
                         )
                     }
+                    // Otherwise the only clue would be a second numbered MP4 appearing later.
+                    if (alreadyInDownloads) {
+                        Text(
+                            "An MP4 of this episode is already in your Downloads folder. Downloading " +
+                                "again will save a second copy alongside it.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                 } else {
                     Text(
-                        if (stream.isHls) {
-                            "Anilili offline library · HLS episodes contain playlists and segments, so they cannot be saved as one phone video yet."
-                        } else {
-                            "Anilili offline library · Public device downloads require Android 10 or newer."
-                        },
+                        "Anilili offline library · Public device downloads require Android 10 or newer.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 6.dp),

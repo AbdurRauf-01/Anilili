@@ -258,32 +258,65 @@ fun ProfileScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    item {
-                        ProfileHero(
-                            loggedIn = loggedIn,
-                            state = profileState,
-                            onLogin = { loginService = it },
-                            onSync = { vm.loadIfLoggedIn() },
-                            onLogout = vm::logout,
-                        )
-                    }
-
-                    profile?.let { loaded ->
-                    }
-
-                    item {
-                        LibraryFilters(
-                            selectedView = selectedView,
-                            onViewChange = { selectedViewName = it.name },
-                            selectedFormat = selectedFormat,
-                            onFormatChange = { selectedFormat = it },
-                            selectedAiring = selectedAiring,
-                            onAiringChange = { selectedAiring = it },
-                            titleFilter = titleFilter,
-                            onTitleFilterChange = { titleFilter = it },
-                            resultCount = selectedCards.size,
-                            showAniListLists = profile != null,
-                        )
+                    if (device.isTv) {
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = device.pagePadding)
+                                    .focusGroup(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                ProfileHero(
+                                    loggedIn = loggedIn,
+                                    state = profileState,
+                                    onLogin = { loginService = it },
+                                    onSync = { vm.loadIfLoggedIn() },
+                                    onLogout = vm::logout,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                LibraryFilters(
+                                    selectedView = selectedView,
+                                    onViewChange = { selectedViewName = it.name },
+                                    selectedFormat = selectedFormat,
+                                    onFormatChange = { selectedFormat = it },
+                                    selectedAiring = selectedAiring,
+                                    onAiringChange = { selectedAiring = it },
+                                    titleFilter = titleFilter,
+                                    onTitleFilterChange = { titleFilter = it },
+                                    resultCount = selectedCards.size,
+                                    showAniListLists = profile != null,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                    } else {
+                        item {
+                            ProfileHero(
+                                loggedIn = loggedIn,
+                                state = profileState,
+                                onLogin = { loginService = it },
+                                onSync = { vm.loadIfLoggedIn() },
+                                onLogout = vm::logout,
+                                modifier = Modifier.padding(horizontal = device.pagePadding),
+                            )
+                        }
+                        item {
+                            LibraryFilters(
+                                selectedView = selectedView,
+                                onViewChange = { selectedViewName = it.name },
+                                selectedFormat = selectedFormat,
+                                onFormatChange = { selectedFormat = it },
+                                selectedAiring = selectedAiring,
+                                onAiringChange = { selectedAiring = it },
+                                titleFilter = titleFilter,
+                                onTitleFilterChange = { titleFilter = it },
+                                resultCount = selectedCards.size,
+                                showAniListLists = profile != null,
+                                modifier = Modifier.padding(horizontal = device.pagePadding),
+                            )
+                        }
                     }
 
                     item {
@@ -475,13 +508,13 @@ private fun ProfileHero(
     onLogin: (AccountService) -> Unit,
     onSync: () -> Unit,
     onLogout: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val device = LocalAppDeviceProfile.current
     val shape = RoundedCornerShape(12.dp)
     Column(
-        Modifier
+        modifier
             .fillMaxWidth()
-            .padding(horizontal = device.pagePadding)
             .clip(shape)
             .background(MaterialTheme.colorScheme.surface)
             .border(1.dp, MaterialTheme.colorScheme.outline, shape),
@@ -637,11 +670,12 @@ private fun LibraryFilters(
     onTitleFilterChange: (String) -> Unit,
     resultCount: Int,
     showAniListLists: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val device = LocalAppDeviceProfile.current
     val viewOptions = (if (showAniListLists) LibraryView.entries else listOf(LibraryView.WATCHLIST))
         .map { SelectOption(it.name, it.label) }
-    Panel(Modifier.padding(horizontal = device.pagePadding)) {
+    Panel(modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SelectorField(
                 value = selectedView.label,

@@ -130,7 +130,9 @@ class PlaybackService : MediaSessionService() {
         // Some Android TV boxes ship a Play Services shell without the cast dynamite module;
         // CastContext.getSharedInstance throws there ("No acceptable module ... found") and
         // must not take the whole service down — playback just runs without Cast.
-        castPlayer = runCatching { CastPlayer(CastContext.getSharedInstance(this)) }
+        castPlayer = runCatching {
+            CastPlayer(CastContext.getSharedInstance(this), MiruroCastMediaItemConverter())
+        }
             .onFailure { DiagnosticsLog.throwable("PlaybackService cast unavailable", it) }
             .getOrNull()
         activePlayer = player
@@ -309,13 +311,27 @@ class PlaybackService : MediaSessionService() {
         val currentPosition = from.currentPosition.coerceAtLeast(0L)
         val shouldPlay = from.playWhenReady
 
+        val transfer = runCatching {
+            if (mediaItems.isNotEmpty()) {
+                to.setMediaItems(mediaItems, currentIndex, currentPosition)
+                to.prepare()
+                to.playWhenReady = shouldPlay
+            }
+        }
+        if (transfer.isFailure) {
+            runCatching {
+                to.stop()
+                to.clearMediaItems()
+            }
+            DiagnosticsLog.throwable(
+                "PlaybackService route transfer failed target=${if (to === castPlayer) "remote" else "local"}",
+                checkNotNull(transfer.exceptionOrNull()),
+            )
+            return
+        }
+
         activePlayer = to
         session.player = sessionPlayer
-        if (mediaItems.isNotEmpty()) {
-            to.setMediaItems(mediaItems, currentIndex, currentPosition)
-            to.prepare()
-            to.playWhenReady = shouldPlay
-        }
         from.stop()
         from.clearMediaItems()
         DiagnosticsLog.event(

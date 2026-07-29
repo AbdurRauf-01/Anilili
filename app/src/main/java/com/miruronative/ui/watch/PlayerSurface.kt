@@ -467,7 +467,9 @@ fun PlayerSurface(
             .setMediaId(activeStream.url)
             .setUri(activeStream.url)
             .setMediaMetadata(metadata)
-            .apply { if (activeStream.isHls) setMimeType(MimeTypes.APPLICATION_M3U8) }
+            // Media3 1.8.x's Cast converter requires a MIME type for every item. Omitting it for
+            // direct MP4s makes the local-to-Cast hand-off throw before the receiver can load.
+            .setMimeType(videoMimeType(activeStream.type, activeStream.url))
             .setSubtitleConfigurations(
                 subtitles.mapIndexed { index, subtitle ->
                     MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.url))
@@ -1021,7 +1023,7 @@ fun PlayerSurface(
                     "Subtitles",
                     Icons.Default.ClosedCaption,
                     onClick = {
-                        controller?.let { toggleSubtitles(it, trackNameProvider) }
+                        controller?.let { toggleSubtitles(context, it, trackNameProvider) }
                         phoneControlsInteraction++
                     },
                 )
@@ -1076,10 +1078,12 @@ fun PlayerSurface(
             val subtitleOptions = if (subtitleTracks.isNotEmpty()) {
                 buildList {
                     add(PlayerQualityOption("Off", subtitleTracks.none { it.selected }) {
-                        applyTextTrack(activeController, null)
+                        applyTextTrack(context, activeController, null)
                     })
                     subtitleTracks.forEach { track ->
-                        add(PlayerQualityOption(track.name, track.selected) { applyTextTrack(activeController, track) })
+                        add(PlayerQualityOption(track.name, track.selected) {
+                            applyTextTrack(context, activeController, track)
+                        })
                     }
                 }
             } else {
@@ -1268,11 +1272,15 @@ internal fun playerToggleWillPlay(playWhenReady: Boolean): Boolean = !playWhenRe
 
 /** Quick subtitle on/off for the control bar's CC button; full track choice lives in the sheet. */
 @OptIn(UnstableApi::class)
-private fun toggleSubtitles(controller: MediaController, trackNameProvider: DefaultTrackNameProvider) {
+private fun toggleSubtitles(
+    context: Context,
+    controller: MediaController,
+    trackNameProvider: DefaultTrackNameProvider,
+) {
     val tracks = trackOptions(controller, trackNameProvider, C.TRACK_TYPE_TEXT)
     if (tracks.isEmpty()) return
-    if (tracks.any { it.selected }) applyTextTrack(controller, null)
-    else applyTextTrack(controller, tracks.first())
+    if (tracks.any { it.selected }) applyTextTrack(context, controller, null)
+    else applyTextTrack(context, controller, tracks.first())
 }
 
 /**
@@ -1284,7 +1292,8 @@ private fun toggleSubtitles(controller: MediaController, trackNameProvider: Defa
  * - While Chromecast endpoints exist on the network, this is the real MediaRouteButton with its
  *   chooser/controller dialogs. A discovery callback keeps scanning active the whole time the
  *   control bar is visible — without it, MediaRouter only scans passively and nearby devices
- *   can take a long time (or forever) to appear in the chooser.
+ *   can take a long time (or forever) to appear in the chooser. A long press still opens Android's
+ *   screen-mirroring settings, so discovering one Chromecast never hides the Miracast/OEM route.
  * - When there are none — most TVs only speak the system's Miracast/"Smart View" cast, not
  *   Google Cast — the icon opens the phone's native cast picker instead of a dead chooser, so
  *   the user can mirror the whole screen to the TVs their phone already finds.
@@ -1329,6 +1338,10 @@ private fun CastButton(modifier: Modifier = Modifier) {
                 val button = MediaRouteButton(themed)
                 button.setDialogFactory(ThemedMediaRouteDialogFactory())
                 runCatching { CastButtonFactory.setUpMediaRouteButton(ctx, button) }
+                button.setOnLongClickListener {
+                    openSystemCastPicker(context)
+                    true
+                }
                 button
             },
         )
@@ -1339,7 +1352,7 @@ private fun CastButton(modifier: Modifier = Modifier) {
         ) {
             androidx.compose.material3.Icon(
                 Icons.Default.Cast,
-                contentDescription = "Cast to TV",
+                contentDescription = "Mirror screen to TV",
                 tint = Color.White,
             )
         }
@@ -1434,11 +1447,13 @@ private fun trackOptions(
         (0 until group.length)
             .filter { group.isTrackSupported(it) }
             .map { index ->
+                val format = group.getTrackFormat(index)
                 TrackOption(
                     trackGroup = group.getMediaTrackGroup(),
                     trackIndex = index,
-                    name = trackNameProvider.getTrackName(group.getTrackFormat(index)),
+                    name = trackNameProvider.getTrackName(format),
                     selected = group.isTrackSelected(index),
+                    castContentId = format.id,
                 )
             }
     }
@@ -1509,7 +1524,20 @@ internal fun categoryAudioRank(name: String, wantsDub: Boolean): Int {
 
 private val MULTI_AUDIO_PROVIDERS = setOf("reanime", "kaa")
 
-private fun applyTextTrack(controller: MediaController, option: TrackOption?) {
+private fun applyTextTrack(context: Context, controller: MediaController, option: TrackOption?) {
+    if (
+        controller.deviceInfo.playbackType == androidx.media3.common.DeviceInfo.PLAYBACK_TYPE_REMOTE &&
+        applyCastTextTrack(context, option?.castContentId)
+    ) {
+        DiagnosticsLog.event(
+            if (option == null) {
+                "PlayerSurface Cast subtitle selection mode=off"
+            } else {
+                "PlayerSurface Cast subtitle selection name=${option.name.take(80)}"
+            },
+        )
+        return
+    }
     val builder = controller.trackSelectionParameters.buildUpon()
         .clearOverridesOfType(C.TRACK_TYPE_TEXT)
         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, option == null)
@@ -1524,6 +1552,30 @@ private fun applyTextTrack(controller: MediaController, option: TrackOption?) {
             "PlayerSurface subtitle selection mode=manual name=${option.name.take(80)}"
         },
     )
+}
+
+/** Media3 1.8.x exposes Cast tracks but does not implement setTrackSelectionParameters. */
+private fun applyCastTextTrack(context: Context, contentId: String?): Boolean {
+    val client = runCatching {
+        CastContext.getSharedInstance(context).sessionManager.currentCastSession?.remoteMediaClient
+    }.getOrNull() ?: return false
+    val mediaTracks = client.mediaInfo?.mediaTracks.orEmpty()
+    val selectedTrackId = contentId?.let { selectedContentId ->
+        mediaTracks.firstOrNull {
+            it.type == com.google.android.gms.cast.MediaTrack.TYPE_TEXT && it.contentId == selectedContentId
+        }?.id ?: return false
+    }
+    val activeIds: LongArray = client.mediaStatus?.activeTrackIds ?: longArrayOf()
+    val retainedIds: List<Long> = activeIds.filter { activeId ->
+        mediaTracks.firstOrNull { it.id == activeId }?.type != com.google.android.gms.cast.MediaTrack.TYPE_TEXT
+    }
+    val requestedIds = (retainedIds + listOfNotNull(selectedTrackId)).toLongArray()
+    client.setActiveMediaTracks(requestedIds).setResultCallback { result ->
+        if (!result.status.isSuccess) {
+            DiagnosticsLog.event("PlayerSurface Cast subtitle selection failed status=${result.status.statusCode}")
+        }
+    }
+    return true
 }
 
 /**
@@ -1591,6 +1643,7 @@ private data class TrackOption(
     val trackIndex: Int,
     val name: String,
     val selected: Boolean,
+    val castContentId: String? = null,
 )
 
 /**
@@ -1674,4 +1727,18 @@ private fun mimeFor(url: String): String = when {
     url.contains(".ttml", ignoreCase = true) || url.contains(".xml", ignoreCase = true) ->
         MimeTypes.APPLICATION_TTML
     else -> MimeTypes.TEXT_VTT
+}
+
+/** Container MIME supplied to both the local player and Cast receiver. */
+@OptIn(UnstableApi::class)
+internal fun videoMimeType(type: String, url: String): String {
+    val normalizedType = type.trim().lowercase()
+    val path = url.substringBefore('?').substringBefore('#').lowercase()
+    return when {
+        normalizedType == "hls" || path.endsWith(".m3u8") -> MimeTypes.APPLICATION_M3U8
+        normalizedType in setOf("webm") || path.endsWith(".webm") -> MimeTypes.VIDEO_WEBM
+        normalizedType in setOf("mkv", "matroska") || path.endsWith(".mkv") -> MimeTypes.VIDEO_MATROSKA
+        normalizedType in setOf("ts", "mpegts") || path.endsWith(".ts") -> MimeTypes.VIDEO_MP2T
+        else -> MimeTypes.VIDEO_MP4
+    }
 }

@@ -89,7 +89,10 @@
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
 
-        <receiver android:name="androidx.mediarouter.media.MediaTransferReceiver" />
+        <!-- Lets Android 13+ System UI move this MediaSession between the phone and Cast routes. -->
+        <receiver
+            android:name="androidx.mediarouter.media.MediaTransferReceiver"
+            android:exported="true" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

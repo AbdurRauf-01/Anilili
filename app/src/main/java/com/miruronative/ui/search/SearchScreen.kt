@@ -1,27 +1,31 @@
 package com.miruronative.ui.search
 
 import android.view.inputmethod.EditorInfo
+import android.view.KeyEvent as AndroidKeyEvent
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -54,6 +58,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -63,23 +68,30 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
 import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.model.Media
@@ -93,7 +105,7 @@ import com.miruronative.ui.components.AnimeCard
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.components.PullRefreshContainer
-import com.miruronative.ui.components.RatingBadge
+import com.miruronative.ui.home.TvMediaCard
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -114,11 +126,35 @@ fun SearchScreen(
     val device = LocalAppDeviceProfile.current
     val gridState = rememberLazyGridState()
     var showFilters by remember { mutableStateOf(false) }
+    var tvHeaderExpanded by remember { mutableStateOf(true) }
+    var restoreTvHeaderFocus by remember { mutableStateOf(false) }
     // Reveal the search + categories bar when the grid is at the top or being dragged upward,
-    // and tuck it away while scrolling down so results get the full screen height. TV keeps the
-    // bar pinned so D-pad focus can always return to the search field.
+    // and tuck it away while scrolling down so results get the full screen height. On TV, moving
+    // focus into a result collapses the whole block; Up from the first result row restores it.
     val scrollingUp = gridState.isScrollingUp()
-    val topBarVisible = device.isTv || scrollingUp
+    val topBarVisible = searchHeaderVisible(
+        isTv = device.isTv,
+        tvHeaderExpanded = tvHeaderExpanded,
+        scrollingUp = scrollingUp,
+    )
+    val tvSearchFieldAttached = tvFieldFocusTarget?.isAttached == true
+
+    LaunchedEffect(
+        device.isTv,
+        topBarVisible,
+        restoreTvHeaderFocus,
+        tvSearchFieldAttached,
+    ) {
+        if (!device.isTv || !topBarVisible || !restoreTvHeaderFocus) return@LaunchedEffect
+        val target = tvFieldFocusTarget ?: return@LaunchedEffect
+        repeat(TV_FOCUS_REQUEST_ATTEMPTS) {
+            if (target.isAttached && runCatching { target.requester.requestFocus() }.isSuccess) {
+                restoreTvHeaderFocus = false
+                return@LaunchedEffect
+            }
+            withFrameNanos {}
+        }
+    }
 
     LaunchedEffect(initialGenre) {
         initialGenre?.let(vm::applyGenreFilter)
@@ -164,6 +200,15 @@ fun SearchScreen(
                         gridState = gridState,
                         isLoadingMore = isLoadingMore,
                         onLoadMore = vm::loadMore,
+                        onTvResultFocused = {
+                            if (device.isTv) tvHeaderExpanded = false
+                        },
+                        onTvReturnToHeader = {
+                            if (device.isTv) {
+                                tvHeaderExpanded = true
+                                restoreTvHeaderFocus = true
+                            }
+                        },
                     )
                 }
             }
@@ -191,6 +236,7 @@ private fun SearchTopBar(
     val device = LocalAppDeviceProfile.current
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val filterFocusRequester = remember { FocusRequester() }
     Surface(
         color = MaterialTheme.colorScheme.background,
         tonalElevation = 0.dp,
@@ -243,6 +289,7 @@ private fun SearchTopBar(
                             focusManager.moveFocus(FocusDirection.Down)
                         },
                         onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
+                        onMoveRight = { filterFocusRequester.requestFocus() },
                         tvFocusTarget = tvFieldFocusTarget,
                     )
                 } else {
@@ -280,7 +327,10 @@ private fun SearchTopBar(
                 Button(
                     onClick = onOpenFilters,
                     contentPadding = PaddingValues(horizontal = 13.dp),
-                    modifier = Modifier.height(56.dp).focusHighlight(RoundedCornerShape(10.dp)),
+                    modifier = Modifier
+                        .focusRequester(filterFocusRequester)
+                        .height(56.dp)
+                        .focusHighlight(RoundedCornerShape(10.dp)),
                     shape = RoundedCornerShape(10.dp),
                 ) {
                     Icon(Icons.Default.FilterList, contentDescription = "Open filters")
@@ -456,9 +506,11 @@ private fun ResultsGrid(
     gridState: LazyGridState,
     isLoadingMore: Boolean,
     onLoadMore: () -> Unit,
+    onTvResultFocused: () -> Unit,
+    onTvReturnToHeader: () -> Unit,
 ) {
     val device = LocalAppDeviceProfile.current
-    val tileMinWidth = if (device.isTv) 220.dp else device.gridMinWidth
+    val tileMinWidth = if (device.isTv) TvSearchCardWidth else device.gridMinWidth
     if (results.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -474,7 +526,7 @@ private fun ResultsGrid(
         return
     }
     var focusedResultIndex by remember(results) { mutableStateOf<Int?>(null) }
-    val horizontalSpacing = if (device.isTv) 14.dp else 9.dp
+    val horizontalSpacing = if (device.isTv) 18.dp else 9.dp
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columnCount = adaptiveColumnCount(
@@ -504,10 +556,14 @@ private fun ResultsGrid(
 
         Column(Modifier.fillMaxSize()) {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(tileMinWidth),
+                columns = if (device.isTv) {
+                    GridCells.FixedSize(TvSearchCardWidth)
+                } else {
+                    GridCells.Adaptive(tileMinWidth)
+                },
                 state = gridState,
                 contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(horizontalSpacing),
+                horizontalArrangement = Arrangement.spacedBy(horizontalSpacing, Alignment.Start),
                 verticalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 14.dp),
             ) {
                 if (!device.isTv) {
@@ -538,11 +594,23 @@ private fun ResultsGrid(
                 }
                 gridItemsIndexed(results, key = { _, media -> media.id }) { index, media ->
                     if (device.isTv) {
-                        TvSearchResultCard(
+                        TvMediaCard(
                             media = media,
                             onClick = { onAnimeClick(media.id) },
-                            modifier = Modifier.onFocusChanged { state ->
-                                if (state.isFocused) focusedResultIndex = index
+                            cardWidth = TvSearchCardWidth,
+                            onFocused = { focused ->
+                                if (focused) {
+                                    focusedResultIndex = index
+                                    onTvResultFocused()
+                                }
+                            },
+                            modifier = Modifier.onPreviewKeyEvent { event ->
+                                val returningToHeader =
+                                    event.nativeKeyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_UP &&
+                                        isFirstTvSearchResultRow(index, columnCount)
+                                if (!returningToHeader) return@onPreviewKeyEvent false
+                                if (event.type == KeyEventType.KeyDown) onTvReturnToHeader()
+                                true
                             },
                         )
                     } else {
@@ -564,76 +632,7 @@ private fun ResultsGrid(
     }
 }
 
-/**
- * Search controls consume most of a TV's vertical space, especially at 720p. A portrait card puts
- * its title below a tall 2:3 poster, which leaves only the image inside the results viewport. TV
- * search therefore uses a landscape tile with its identifying text inside the artwork itself.
- */
-@Composable
-private fun TvSearchResultCard(
-    media: Media,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val shape = RoundedCornerShape(10.dp)
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .focusHighlight(shape, focusedScale = 1.045f)
-            .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClickLabel = "Open ${media.title.preferred}", onClick = onClick),
-    ) {
-        AsyncImage(
-            model = media.bannerImage ?: media.coverImage.best,
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-        )
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = .84f),
-                        .44f to Color.Transparent,
-                        1f to Color.Black.copy(alpha = .72f),
-                    ),
-                ),
-        )
-        media.averageScore?.let { score ->
-            RatingBadge(score, Modifier.align(Alignment.TopEnd).padding(7.dp))
-        }
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .fillMaxWidth()
-                .padding(start = 9.dp, top = 9.dp, end = 58.dp),
-        ) {
-            Text(
-                text = media.title.preferred,
-                color = Color.White,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = listOfNotNull(
-                    media.format?.replace('_', ' '),
-                    media.seasonYear?.toString(),
-                ).joinToString("  ·  "),
-                color = Color.White.copy(alpha = .72f),
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-private fun adaptiveColumnCount(
+internal fun adaptiveColumnCount(
     availableWidth: androidx.compose.ui.unit.Dp,
     horizontalPadding: androidx.compose.ui.unit.Dp,
     minimumTileWidth: androidx.compose.ui.unit.Dp,
@@ -644,6 +643,15 @@ private fun adaptiveColumnCount(
         .toInt()
         .coerceAtLeast(1)
 }
+
+internal fun searchHeaderVisible(
+    isTv: Boolean,
+    tvHeaderExpanded: Boolean,
+    scrollingUp: Boolean,
+): Boolean = if (isTv) tvHeaderExpanded else scrollingUp
+
+internal fun isFirstTvSearchResultRow(index: Int, columnCount: Int): Boolean =
+    index >= 0 && index < columnCount.coerceAtLeast(1)
 
 /**
  * True while the grid is resting at the top or the user is dragging it back upward — the cue for
@@ -670,7 +678,11 @@ private fun LazyGridState.isScrollingUp(): Boolean {
     return atTop || lastRealDirectionWasUp
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    ExperimentalLayoutApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
 @Composable
 private fun FilterSheet(
     filters: DiscoverFilters,
@@ -683,209 +695,264 @@ private fun FilterSheet(
     val studioLookupLoading by vm.isStudioLookupLoading.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val initialFocusRequester = remember { FocusRequester() }
+    // AndroidView text fields claim the window's initial focus as soon as they are created. Keep
+    // them out of the TV focus graph until the sheet's first Compose control has received focus.
+    var tvTextFieldsFocusable by remember { mutableStateOf(!device.isTv) }
     var tagSearch by remember { mutableStateOf("") }
     val visibleTags = remember(options.tags, tagSearch) {
         options.tags
             .filter { tagSearch.isBlank() || it.name.contains(tagSearch, ignoreCase = true) }
             .take(36)
     }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-    ) {
-        LazyColumn(
-            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Filter catalog", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                        Text(
-                            "Combine filters to narrow the full AniList catalog.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(onClick = vm::clearFilters) { Text("Clear") }
-                }
+    LaunchedEffect(device.isTv) {
+        if (!device.isTv) return@LaunchedEffect
+        repeat(TV_FOCUS_REQUEST_ATTEMPTS) {
+            withFrameNanos {}
+            if (runCatching { initialFocusRequester.requestFocus() }.isSuccess) {
+                withFrameNanos {}
+                tvTextFieldsFocusable = true
+                return@LaunchedEffect
             }
-            item { FilterSection("Sort by") { ChoiceFlow(SearchViewModel.SORTS, filters.sort, vm::setSort) } }
-            item {
-                FilterSection("Studio") {
-                    if (device.isTv) {
-                        TvNativeTextField(
-                            value = vm.studioQuery,
-                            onValueChange = vm::onStudioQueryChange,
-                            hint = "Find a studio, for example MAPPA",
-                            modifier = Modifier.fillMaxWidth(),
-                            imeAction = EditorInfo.IME_ACTION_SEARCH,
-                            onImeAction = {
-                                vm.selectFirstStudioSuggestion()
-                                focusManager.moveFocus(FocusDirection.Down)
-                            },
-                            onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
-                        )
-                    } else {
-                        OutlinedTextField(
-                            value = vm.studioQuery,
-                            onValueChange = vm::onStudioQueryChange,
-                            modifier = Modifier.fillMaxWidth(),
-                            placeholder = { Text("Find a studio (for example MAPPA)") },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                            trailingIcon = {
-                                when {
-                                    studioLookupLoading -> CircularProgressIndicator(
-                                        modifier = Modifier.size(22.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                    vm.studioQuery.isNotEmpty() -> IconButton(onClick = vm::clearStudio) {
-                                        Icon(Icons.Default.Close, contentDescription = "Clear studio")
-                                    }
-                                }
-                            },
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = {
-                                vm.selectFirstStudioSuggestion()
-                                keyboard?.hide()
-                                focusManager.moveFocus(FocusDirection.Down)
-                            }),
-                            singleLine = true,
-                            shape = RoundedCornerShape(10.dp),
-                        )
-                    }
-                    if (studioSuggestions.isNotEmpty()) {
-                        FlowRow(
-                            modifier = Modifier.padding(top = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(7.dp),
-                        ) {
-                            studioSuggestions.forEach { studio ->
-                                val name = studio.name ?: return@forEach
-                                FilterChip(
-                                    selected = filters.studioId == studio.id,
-                                    onClick = { vm.selectStudio(studio) },
-                                    label = { Text(name) },
-                                    modifier = Modifier.focusHighlight(RoundedCornerShape(8.dp)),
-                                )
+        }
+        tvTextFieldsFocusable = true
+    }
+    val filterContent: @Composable ColumnScope.() -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Filter catalog", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                Text(
+                    "Combine filters to narrow the full AniList catalog.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(
+                onClick = vm::clearFilters,
+                modifier = if (device.isTv) {
+                    Modifier
+                        .focusRequester(initialFocusRequester)
+                        .focusHighlight(RoundedCornerShape(8.dp))
+                } else {
+                    Modifier
+                },
+            ) { Text("Clear") }
+        }
+        FilterSection("Sort by") { ChoiceFlow(SearchViewModel.SORTS, filters.sort, vm::setSort) }
+        FilterSection("Studio") {
+            if (device.isTv) {
+                TvNativeTextField(
+                    value = vm.studioQuery,
+                    onValueChange = vm::onStudioQueryChange,
+                    hint = "Find a studio, for example MAPPA",
+                    modifier = Modifier.fillMaxWidth(),
+                    imeAction = EditorInfo.IME_ACTION_SEARCH,
+                    onImeAction = {
+                        vm.selectFirstStudioSuggestion()
+                        focusManager.moveFocus(FocusDirection.Down)
+                    },
+                    onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
+                    focusable = tvTextFieldsFocusable,
+                )
+            } else {
+                OutlinedTextField(
+                    value = vm.studioQuery,
+                    onValueChange = vm::onStudioQueryChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Find a studio (for example MAPPA)") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = {
+                        when {
+                            studioLookupLoading -> CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            vm.studioQuery.isNotEmpty() -> IconButton(onClick = vm::clearStudio) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear studio")
                             }
                         }
-                    } else if (filters.studioId != null && !filters.studioName.isNullOrBlank()) {
-                        Text(
-                            "Filtering by ${filters.studioName}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
-                    }
-                }
-            }
-            item {
-                FilterSection("Release year") {
-                    if (device.isTv) {
-                        TvNativeTextField(
-                            value = filters.year?.toString().orEmpty(),
-                            onValueChange = { value ->
-                                val digits = value.filter(Char::isDigit).take(4)
-                                vm.setYear(digits.toIntOrNull()?.takeIf { it in 1900..2100 })
-                            },
-                            hint = "Any year, for example 2024",
-                            modifier = Modifier.fillMaxWidth(),
-                            inputType = TvTextInputType.NUMBER,
-                            onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
-                        )
-                    } else {
-                        OutlinedTextField(
-                            value = filters.year?.toString().orEmpty(),
-                            onValueChange = { value ->
-                                val digits = value.filter(Char::isDigit).take(4)
-                                vm.setYear(digits.toIntOrNull()?.takeIf { it in 1900..2100 })
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            placeholder = { Text("Any year (for example 2024)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                            shape = RoundedCornerShape(10.dp),
-                        )
-                    }
-                }
-            }
-            item { FilterSection("Status") { NullableChoiceFlow(SearchViewModel.STATUSES, filters.status, vm::setStatus) } }
-            item { FilterSection("Format") { NullableChoiceFlow(SearchViewModel.FORMATS, filters.format, vm::setFormat) } }
-            item {
-                FilterSection("Minimum rating") {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = filters.minimumScore == null, onClick = { vm.setMinimumScore(null) }, label = { Text("Any") })
-                        SearchViewModel.RATINGS.forEach { rating ->
-                            FilterChip(
-                                selected = filters.minimumScore == rating,
-                                onClick = { vm.setMinimumScore(rating) },
-                                label = { Text("$rating%+") },
-                            )
-                        }
-                    }
-                }
-            }
-            item {
-                FilterSection("Genres") {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        options.genres.forEach { genre ->
-                            FilterChip(
-                                selected = genre in filters.genres,
-                                onClick = { vm.toggleGenre(genre) },
-                                label = { Text(genre) },
-                            )
-                        }
-                    }
-                }
-            }
-            if (options.tags.isNotEmpty()) {
-                item {
-                    FilterSection("Tags") {
-                        if (device.isTv) {
-                            TvNativeTextField(
-                                value = tagSearch,
-                                onValueChange = { tagSearch = it },
-                                hint = "Find a tag",
-                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                                onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
-                            )
-                        } else {
-                            OutlinedTextField(
-                                value = tagSearch,
-                                onValueChange = { tagSearch = it },
-                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                                placeholder = { Text("Find a tag") },
-                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                                singleLine = true,
-                                shape = RoundedCornerShape(10.dp),
-                            )
-                        }
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                            visibleTags.forEach { tag ->
-                                AssistChip(
-                                    onClick = { vm.toggleTag(tag.name) },
-                                    label = { Text(tag.name) },
-                                    leadingIcon = if (tag.name in filters.tags) {
-                                        { Text("✓", color = MaterialTheme.colorScheme.primary) }
-                                    } else null,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            item {
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = {
+                        vm.selectFirstStudioSuggestion()
+                        keyboard?.hide()
+                        focusManager.moveFocus(FocusDirection.Down)
+                    }),
+                    singleLine = true,
                     shape = RoundedCornerShape(10.dp),
+                )
+            }
+            if (studioSuggestions.isNotEmpty()) {
+                FlowRow(
+                    modifier = Modifier.padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
-                    Text("Show results", fontWeight = FontWeight.Bold)
+                    studioSuggestions.forEach { studio ->
+                        val name = studio.name ?: return@forEach
+                        FilterChip(
+                            selected = filters.studioId == studio.id,
+                            onClick = { vm.selectStudio(studio) },
+                            label = { Text(name) },
+                            modifier = Modifier.focusHighlight(RoundedCornerShape(8.dp)),
+                        )
+                    }
+                }
+            } else if (filters.studioId != null && !filters.studioName.isNullOrBlank()) {
+                Text(
+                    "Filtering by ${filters.studioName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+        FilterSection("Release year") {
+            if (device.isTv) {
+                TvNativeTextField(
+                    value = filters.year?.toString().orEmpty(),
+                    onValueChange = { value ->
+                        val digits = value.filter(Char::isDigit).take(4)
+                        vm.setYear(digits.toIntOrNull()?.takeIf { it in 1900..2100 })
+                    },
+                    hint = "Any year, for example 2024",
+                    modifier = Modifier.fillMaxWidth(),
+                    inputType = TvTextInputType.NUMBER,
+                    onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
+                    focusable = tvTextFieldsFocusable,
+                )
+            } else {
+                OutlinedTextField(
+                    value = filters.year?.toString().orEmpty(),
+                    onValueChange = { value ->
+                        val digits = value.filter(Char::isDigit).take(4)
+                        vm.setYear(digits.toIntOrNull()?.takeIf { it in 1900..2100 })
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Any year (for example 2024)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp),
+                )
+            }
+        }
+        FilterSection("Status") { NullableChoiceFlow(SearchViewModel.STATUSES, filters.status, vm::setStatus) }
+        FilterSection("Format") { NullableChoiceFlow(SearchViewModel.FORMATS, filters.format, vm::setFormat) }
+        FilterSection("Minimum rating") {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = filters.minimumScore == null,
+                    onClick = { vm.setMinimumScore(null) },
+                    label = { Text("Any") },
+                )
+                SearchViewModel.RATINGS.forEach { rating ->
+                    FilterChip(
+                        selected = filters.minimumScore == rating,
+                        onClick = { vm.setMinimumScore(rating) },
+                        label = { Text("$rating%+") },
+                    )
                 }
             }
         }
+        FilterSection("Genres") {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                options.genres.forEach { genre ->
+                    FilterChip(
+                        selected = genre in filters.genres,
+                        onClick = { vm.toggleGenre(genre) },
+                        label = { Text(genre) },
+                    )
+                }
+            }
+        }
+        if (options.tags.isNotEmpty()) {
+            FilterSection("Tags") {
+                if (device.isTv) {
+                    TvNativeTextField(
+                        value = tagSearch,
+                        onValueChange = { tagSearch = it },
+                        hint = "Find a tag",
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
+                        focusable = tvTextFieldsFocusable,
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = tagSearch,
+                        onValueChange = { tagSearch = it },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        placeholder = { Text("Find a tag") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                    )
+                }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    visibleTags.forEach { tag ->
+                        AssistChip(
+                            onClick = { vm.toggleTag(tag.name) },
+                            label = { Text(tag.name) },
+                            leadingIcon = if (tag.name in filters.tags) {
+                                { Text("✓", color = MaterialTheme.colorScheme.primary) }
+                            } else null,
+                        )
+                    }
+                }
+            }
+        }
+        Button(
+            onClick = onDismiss,
+            modifier = Modifier.fillMaxWidth().height(50.dp),
+            shape = RoundedCornerShape(10.dp),
+        ) {
+            Text("Show results", fontWeight = FontWeight.Bold)
+        }
+    }
+
+    if (device.isTv) {
+        BackHandler(onBack = onDismiss)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .zIndex(20f)
+                .background(Color.Black.copy(alpha = 0.58f)),
+        ) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.72f)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .focusProperties { exit = { FocusRequester.Cancel } }
+                    .focusGroup()
+                    .verticalScroll(rememberScrollState())
+                    .semantics { paneTitle = "Catalog filters" }
+                    .padding(start = 24.dp, end = 24.dp, top = 20.dp, bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                content = filterContent,
+            )
+        }
+        return
+    }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 18.dp, end = 18.dp, bottom = 36.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            content = filterContent,
+        )
     }
 }
+
+private const val TV_FOCUS_REQUEST_ATTEMPTS = 6
+private val TvSearchCardWidth = 200.dp
 
 @Composable
 private fun FilterSection(title: String, content: @Composable () -> Unit) {

@@ -64,6 +64,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -81,7 +82,8 @@ import kotlinx.coroutines.delay
 import kotlin.math.abs
 
 private val TvPagePadding = 48.dp
-private val TvRailCardWidth = 222.dp
+internal val TvMediaCardWidth = 222.dp
+private val TvRailCardWidth = TvMediaCardWidth
 private val TvCardShape = RoundedCornerShape(12.dp)
 private const val TV_HERO_AUTO_ADVANCE_MS = 7_000L
 
@@ -508,11 +510,12 @@ private fun TvMediaRail(
 }
 
 @Composable
-private fun TvMediaCard(
+internal fun TvMediaCard(
     media: Media,
     onClick: () -> Unit,
     onFocused: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    cardWidth: Dp = TvMediaCardWidth,
 ) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-media-card-scale")
@@ -520,7 +523,7 @@ private fun TvMediaCard(
 
     Column(
         modifier = modifier
-            .width(TvRailCardWidth)
+            .width(cardWidth)
             .zIndex(if (focused) 1f else 0f)
             .scale(scale)
             .onFocusChanged {

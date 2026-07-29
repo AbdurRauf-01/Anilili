@@ -58,11 +58,14 @@ fun TvNativeTextField(
     imeAction: Int = EditorInfo.IME_ACTION_DONE,
     onImeAction: () -> Unit = {},
     onMoveDown: (() -> Unit)? = null,
+    onMoveRight: (() -> Unit)? = null,
     tvFocusTarget: TvFocusTarget? = null,
+    focusable: Boolean = true,
 ) {
     val currentOnValueChange by rememberUpdatedState(onValueChange)
     val currentOnImeAction by rememberUpdatedState(onImeAction)
     val currentOnMoveDown by rememberUpdatedState(onMoveDown)
+    val currentOnMoveRight by rememberUpdatedState(onMoveRight)
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val hintColor = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
     val surfaceColor = MaterialTheme.colorScheme.surface.toArgb()
@@ -105,8 +108,8 @@ fun TvNativeTextField(
                     setPadding(horizontal, 0, horizontal, 0)
                     this.inputType = inputType.androidValue
                     this.imeOptions = imeAction
-                    isFocusable = true
-                    isFocusableInTouchMode = true
+                    isFocusable = focusable
+                    isFocusableInTouchMode = focusable
                     showSoftInputOnFocus = false
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
 
@@ -126,6 +129,19 @@ fun TvNativeTextField(
                                 currentOnMoveDown != null -> {
                                 hideNativeTvKeyboard(this)
                                 currentOnMoveDown?.invoke()
+                                true
+                            }
+                            event.action == KeyEvent.ACTION_DOWN &&
+                                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT &&
+                                currentOnMoveRight != null &&
+                                selectionStart == text.length &&
+                                selectionEnd == text.length -> {
+                                // A native EditText consumes Right to move its cursor before
+                                // Compose can run spatial focus search. Screens with a control to
+                                // the field's right can provide an escape once the caret is at the
+                                // end, while retaining normal cursor movement within the query.
+                                hideNativeTvKeyboard(this)
+                                currentOnMoveRight?.invoke()
                                 true
                             }
                             else -> false
@@ -154,6 +170,8 @@ fun TvNativeTextField(
                 editor.setHintTextColor(hintColor)
                 editor.inputType = inputType.androidValue
                 editor.imeOptions = imeAction
+                editor.isFocusable = focusable
+                editor.isFocusableInTouchMode = focusable
                 val watcher = editor.tag as? NativeTvTextWatcher
                 watcher?.onValueChange = currentOnValueChange
                 val echoes = watcher?.pendingEchoes

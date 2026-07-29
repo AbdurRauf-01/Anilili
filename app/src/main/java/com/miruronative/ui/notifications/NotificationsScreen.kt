@@ -3,11 +3,14 @@ package com.miruronative.ui.notifications
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,6 +18,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,6 +44,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -51,7 +60,11 @@ import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.model.AppNotification
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
+import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.adaptive.focusHighlight
+import com.miruronative.ui.adaptive.rememberTvFocusTarget
+import com.miruronative.ui.adaptive.tvFocusRedirect
+import com.miruronative.ui.adaptive.tvFocusTarget
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.components.ScrollAwareTopBar
@@ -126,6 +139,8 @@ fun NotificationsScreen(
     val state by vm.state.collectAsState()
     val unreadCount by vm.unreadCount.collectAsState()
     var tab by remember { mutableStateOf(Tab.ALL) }
+    val backFocusRequester = remember { FocusRequester() }
+    val tvContentFocusTarget = rememberTvFocusTarget()
     // The user is now looking at the same items the tray was advertising: clear the shade so
     // the system notifications never outlive the in-app read state.
     val notifContext = androidx.compose.ui.platform.LocalContext.current
@@ -141,7 +156,12 @@ fun NotificationsScreen(
                 navigationIcon = {
                     IconButton(
                         onClick = onBack,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                        modifier = Modifier
+                            .focusRequester(backFocusRequester)
+                            .focusProperties {
+                                if (device.isTv) tvFocusRedirect(tvContentFocusTarget) { down = it }
+                            }
+                            .focusHighlight(RoundedCornerShape(24.dp)),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
@@ -149,14 +169,22 @@ fun NotificationsScreen(
                 actions = {
                     IconButton(
                         onClick = vm::refresh,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                        modifier = Modifier
+                            .focusProperties {
+                                if (device.isTv) tvFocusRedirect(tvContentFocusTarget) { down = it }
+                            }
+                            .focusHighlight(RoundedCornerShape(24.dp)),
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
                     TextButton(
                         onClick = vm::markAllRead,
                         enabled = unreadCount > 0,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                        modifier = Modifier
+                            .focusProperties {
+                                if (device.isTv) tvFocusRedirect(tvContentFocusTarget) { down = it }
+                            }
+                            .focusHighlight(RoundedCornerShape(20.dp)),
                     ) {
                         Text("Mark all read")
                     }
@@ -193,6 +221,9 @@ fun NotificationsScreen(
                     onAnimeClick = onAnimeClick,
                     pagePadding = device.pagePadding,
                     contentPadding = padding,
+                    isTv = device.isTv,
+                    backFocusRequester = backFocusRequester,
+                    tvContentFocusTarget = tvContentFocusTarget,
                 )
             }
         }
@@ -208,6 +239,9 @@ private fun NotificationList(
     onAnimeClick: (Int) -> Unit,
     pagePadding: androidx.compose.ui.unit.Dp,
     contentPadding: PaddingValues = PaddingValues(),
+    isTv: Boolean,
+    backFocusRequester: FocusRequester,
+    tvContentFocusTarget: TvFocusTarget,
 ) {
     val filtered = items.filter(tab::matches)
     val now = System.currentTimeMillis() / 1000
@@ -218,6 +252,23 @@ private fun NotificationList(
             age < 30L * 24 * 3600 -> "LAST 30 DAYS"
             else -> "OVER 1 MONTH AGO"
         }
+    }
+
+    if (isTv) {
+        TvNotificationGrid(
+            items = items,
+            filtered = filtered,
+            sections = sections,
+            tab = tab,
+            unreadTotal = unreadTotal,
+            onTab = onTab,
+            onAnimeClick = onAnimeClick,
+            pagePadding = pagePadding,
+            contentPadding = contentPadding,
+            backFocusRequester = backFocusRequester,
+            tvContentFocusTarget = tvContentFocusTarget,
+        )
+        return
     }
 
     LazyColumn(
@@ -275,7 +326,96 @@ private fun NotificationList(
 }
 
 @Composable
-private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
+private fun TvNotificationGrid(
+    items: List<AppNotification>,
+    filtered: List<AppNotification>,
+    sections: Map<String, List<AppNotification>>,
+    tab: Tab,
+    unreadTotal: Int,
+    onTab: (Tab) -> Unit,
+    onAnimeClick: (Int) -> Unit,
+    pagePadding: androidx.compose.ui.unit.Dp,
+    contentPadding: PaddingValues,
+    backFocusRequester: FocusRequester,
+    tvContentFocusTarget: TvFocusTarget,
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(notificationColumnCount(isTv = true)),
+        modifier = Modifier.fillMaxSize().focusGroup(),
+        contentPadding = PaddingValues(
+            start = pagePadding,
+            end = pagePadding,
+            top = contentPadding.calculateTopPadding() + 6.dp,
+            bottom = contentPadding.calculateBottomPadding() + 32.dp,
+        ),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            Row(
+                modifier = Modifier.fillMaxWidth().focusGroup().padding(bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Tab.entries.forEachIndexed { index, entry ->
+                    val count = items.count { it.unread && entry.matches(it) }
+                    FilterChip(
+                        selected = tab == entry,
+                        onClick = { onTab(entry) },
+                        label = { Text(if (unreadTotal > 0) "${entry.label}  $count" else entry.label) },
+                        modifier = Modifier
+                            .then(
+                                if (index == 0) Modifier.tvFocusTarget(tvContentFocusTarget)
+                                else Modifier,
+                            )
+                            .focusProperties { up = backFocusRequester }
+                            .focusHighlight(RoundedCornerShape(8.dp)),
+                    )
+                }
+            }
+        }
+        if (filtered.isEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Text(
+                    "Nothing here yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 32.dp).fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+        }
+        sections.forEach { (section, sectionItems) ->
+            item(key = "header-$section", span = { GridItemSpan(maxLineSpan) }) {
+                Text(
+                    section,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+                )
+            }
+            sectionItems.forEach { item ->
+                item(key = item.id) {
+                    NotificationCard(
+                        item = item,
+                        onClick = { item.mediaId?.let(onAnimeClick) },
+                        compactTv = true,
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal fun notificationColumnCount(isTv: Boolean): Int = if (isTv) 2 else 1
+
+@Composable
+private fun NotificationCard(
+    item: AppNotification,
+    onClick: () -> Unit,
+    compactTv: Boolean = false,
+) {
     val shape = RoundedCornerShape(14.dp)
     Box(
         Modifier
@@ -288,7 +428,14 @@ private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
                 color = if (item.unread) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
                 shape = shape,
             )
-            .clickable(enabled = item.mediaId != null, onClick = onClick),
+            .then(
+                when {
+                    item.mediaId != null -> Modifier.clickable(onClick = onClick)
+                    compactTv -> Modifier.focusable()
+                    else -> Modifier.clickable(enabled = false, onClick = onClick)
+                },
+            )
+            .then(if (compactTv) Modifier.height(112.dp) else Modifier),
     ) {
         item.banner?.let { banner ->
             AsyncImage(
@@ -308,7 +455,10 @@ private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
-                    .size(width = 58.dp, height = 76.dp)
+                    .size(
+                        width = if (compactTv) 64.dp else 58.dp,
+                        height = if (compactTv) 86.dp else 76.dp,
+                    )
                     .clip(RoundedCornerShape(8.dp)),
             )
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -324,34 +474,53 @@ private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
                         detail,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
+                        maxLines = if (compactTv) 1 else 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
-                item.badge?.let { badge ->
-                    Text(
-                        badge,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .padding(top = 8.dp)
-                            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                    )
+                if (compactTv) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        item.badge?.let { badge -> NotificationBadge(badge) }
+                        Spacer(Modifier.weight(1f))
+                        NotificationDate(item.createdAt)
+                    }
+                } else {
+                    item.badge?.let { badge ->
+                        NotificationBadge(badge, modifier = Modifier.padding(top = 8.dp))
+                    }
                 }
             }
-            Text(
-                formatDay(item.createdAt),
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.Bottom)
-                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-            )
+            if (!compactTv) NotificationDate(item.createdAt, Modifier.align(Alignment.Bottom))
         }
     }
+}
+
+@Composable
+private fun NotificationBadge(badge: String, modifier: Modifier = Modifier) {
+    Text(
+        badge,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier
+            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    )
+}
+
+@Composable
+private fun NotificationDate(epochSeconds: Long, modifier: Modifier = Modifier) {
+    Text(
+        formatDay(epochSeconds),
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier
+            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    )
 }
 
 private val dayFormatter = DateTimeFormatter.ofPattern("d MMM")

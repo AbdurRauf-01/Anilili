@@ -120,8 +120,11 @@ import com.miruronative.ui.HanimeResolverWebView
 import com.miruronative.ui.home.HomeScreen
 import com.miruronative.ui.PipeWebView
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
+import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.adaptive.rememberAppDeviceProfile
+import com.miruronative.ui.adaptive.rememberTvFocusTarget
+import com.miruronative.ui.adaptive.tvFocusRedirect
 import com.miruronative.ui.nav.Routes
 import com.miruronative.ui.components.AppLaunchSplash
 import com.miruronative.ui.components.LaunchSplashFadeMillis
@@ -393,8 +396,10 @@ private fun MiruroRoot(
     val chromeScope = rememberCoroutineScope()
     var restoreChromeJob by remember { mutableStateOf<Job?>(null) }
     val tvSearchRailFocusRequester = remember { FocusRequester() }
-    val tvSearchFieldFocusRequester = remember { FocusRequester() }
-    val tvHomePrimaryFocusRequester = remember { FocusRequester() }
+    // Redirect destinations, not plain requesters: both live on screens that are only composed on
+    // some routes and only once their data lands, and a redirect to an absent one crashes the app.
+    val tvSearchFieldFocusTarget = rememberTvFocusTarget()
+    val tvHomePrimaryFocusTarget = rememberTvFocusTarget()
     // Direction-based like YouTube/Chrome: hide once a downward scroll passes a small threshold,
     // show the moment the user scrolls up (or goes idle). The threshold stops micro-scrolls from
     // flickering the chrome, and hide/show firing once per direction change (instead of on every
@@ -506,7 +511,7 @@ private fun MiruroRoot(
                                 menuLanguage = menuLanguage,
                                 onNavigate = nav::navigateTab,
                                 searchRailFocusRequester = tvSearchRailFocusRequester,
-                                searchFieldFocusRequester = tvSearchFieldFocusRequester,
+                                searchFieldFocusTarget = tvSearchFieldFocusTarget,
                                 modifier = Modifier.fillMaxHeight(),
                             )
                         }
@@ -514,8 +519,8 @@ private fun MiruroRoot(
                             nav = nav,
                             inPictureInPicture = inPictureInPicture,
                             onPictureInPictureReadyChanged = onPictureInPictureReadyChanged,
-                            tvSearchFieldFocusRequester = tvSearchFieldFocusRequester,
-                            tvHomePrimaryFocusRequester = tvHomePrimaryFocusRequester,
+                            tvSearchFieldFocusTarget = tvSearchFieldFocusTarget,
+                            tvHomePrimaryFocusTarget = tvHomePrimaryFocusTarget,
                             modifier = Modifier
                                 .weight(1f)
                                 .then(
@@ -540,8 +545,8 @@ private fun MiruroRoot(
                                 nav.navigate(Routes.NOTIFICATIONS) { launchSingleTop = true }
                             },
                             searchNavFocusRequester = tvSearchRailFocusRequester,
-                            searchFieldFocusRequester = tvSearchFieldFocusRequester,
-                            homeContentFocusRequester = tvHomePrimaryFocusRequester,
+                            searchFieldFocusTarget = tvSearchFieldFocusTarget,
+                            homeContentFocusTarget = tvHomePrimaryFocusTarget,
                             modifier = Modifier.align(Alignment.TopCenter),
                         )
                     }
@@ -614,8 +619,8 @@ private fun AppTvTopNavigation(
     onNavigate: (String) -> Unit,
     onNotificationsClick: () -> Unit,
     searchNavFocusRequester: FocusRequester,
-    searchFieldFocusRequester: FocusRequester,
-    homeContentFocusRequester: FocusRequester,
+    searchFieldFocusTarget: TvFocusTarget,
+    homeContentFocusTarget: TvFocusTarget,
     modifier: Modifier = Modifier,
 ) {
     val focusRequesters = remember(searchNavFocusRequester) {
@@ -685,8 +690,8 @@ private fun AppTvTopNavigation(
                         (currentRoute == Routes.DETAIL && tab == Tab.HOME),
                     onClick = { onNavigate(tab.route) },
                     focusRequester = focusRequesters.getValue(tab),
-                    searchFieldFocusRequester = searchFieldFocusRequester,
-                    homeContentFocusRequester = homeContentFocusRequester,
+                    searchFieldFocusTarget = searchFieldFocusTarget,
+                    homeContentFocusTarget = homeContentFocusTarget,
                 )
             }
         }
@@ -756,8 +761,8 @@ private fun TvTopNavigationItem(
     selected: Boolean,
     onClick: () -> Unit,
     focusRequester: FocusRequester,
-    searchFieldFocusRequester: FocusRequester,
-    homeContentFocusRequester: FocusRequester,
+    searchFieldFocusTarget: TvFocusTarget,
+    homeContentFocusTarget: TvFocusTarget,
 ) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(12.dp)
@@ -776,10 +781,14 @@ private fun TvTopNavigationItem(
         modifier = Modifier
             .focusRequester(focusRequester)
             .focusProperties {
+                // Only redirect into a destination that is on screen right now. HOME stays
+                // "selected" while a detail page is open and the home rows are gone, and the
+                // search box is absent until Search composes — redirecting at either of those
+                // moments throws out of the focus owner and kills the app.
                 if (selected) {
                     when (tab) {
-                        Tab.HOME -> down = homeContentFocusRequester
-                        Tab.SEARCH -> down = searchFieldFocusRequester
+                        Tab.HOME -> tvFocusRedirect(homeContentFocusTarget) { down = it }
+                        Tab.SEARCH -> tvFocusRedirect(searchFieldFocusTarget) { down = it }
                         else -> Unit
                     }
                 }
@@ -839,7 +848,7 @@ private fun AppNavigationRail(
     menuLanguage: MenuLanguage,
     onNavigate: (String) -> Unit,
     searchRailFocusRequester: FocusRequester,
-    searchFieldFocusRequester: FocusRequester,
+    searchFieldFocusTarget: TvFocusTarget,
     modifier: Modifier = Modifier,
 ) {
     val device = LocalAppDeviceProfile.current
@@ -888,9 +897,11 @@ private fun AppNavigationRail(
                     .focusRequester(focusRequesters.getValue(tab))
                     .focusProperties {
                         // Spatial focus search prefers the Movies chip because it is horizontally
-                        // aligned with the rail item. Route Right to the actual search box.
+                        // aligned with the rail item. Route Right to the actual search box — but
+                        // only while that box is really attached, since resolving a redirect to a
+                        // requester nothing holds throws out of the focus owner.
                         if (device.isTv && tab == Tab.SEARCH && currentRoute == Routes.SEARCH) {
-                            right = searchFieldFocusRequester
+                            tvFocusRedirect(searchFieldFocusTarget) { right = it }
                         }
                     }
                     .focusHighlight(),
@@ -904,8 +915,8 @@ private fun AppNavHost(
     nav: androidx.navigation.NavHostController,
     inPictureInPicture: Boolean,
     onPictureInPictureReadyChanged: (Boolean) -> Unit,
-    tvSearchFieldFocusRequester: FocusRequester,
-    tvHomePrimaryFocusRequester: FocusRequester,
+    tvSearchFieldFocusTarget: TvFocusTarget,
+    tvHomePrimaryFocusTarget: TvFocusTarget,
     modifier: Modifier = Modifier,
 ) {
     NavHost(
@@ -929,7 +940,7 @@ private fun AppNavHost(
                         else nav.navigate(Routes.genreSearch(genre)) { launchSingleTop = true }
                     },
                     onNotificationsClick = { nav.navigate(Routes.NOTIFICATIONS) { launchSingleTop = true } },
-                    tvPrimaryFocusRequester = tvHomePrimaryFocusRequester,
+                    tvPrimaryFocusTarget = tvHomePrimaryFocusTarget,
                 )
             }
             composable(Routes.NOTIFICATIONS) {
@@ -961,7 +972,7 @@ private fun AppNavHost(
                 LaunchedEffect(Unit) { DiagnosticsLog.event("Route SEARCH content entered") }
                 SearchScreen(
                     onAnimeClick = { id -> nav.navigate(Routes.detail(id)) },
-                    tvFieldFocusRequester = tvSearchFieldFocusRequester,
+                    tvFieldFocusTarget = tvSearchFieldFocusTarget,
                     initialStudioId = entry.arguments?.getInt(Routes.Arg.STUDIO_ID)?.takeIf { it > 0 },
                     initialStudioName = entry.arguments?.getString(Routes.Arg.STUDIO_NAME),
                     initialGenre = entry.arguments?.getString(Routes.Arg.GENRE),

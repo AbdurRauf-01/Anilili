@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.miruronative.ui.adaptive.TvNativeTextField
+import com.miruronative.ui.adaptive.rememberTvFocusTarget
 import com.miruronative.ui.adaptive.TvTextInputType
 import com.miruronative.ui.adaptive.focusHighlight
 import kotlinx.coroutines.delay
@@ -57,7 +58,7 @@ internal fun TvWebEditorDialog(
     onNext: () -> Unit,
     onDone: () -> Unit,
 ) {
-    val fieldFocus = remember(field.id) { FocusRequester() }
+    val fieldFocus = rememberTvFocusTarget()
     val actionFocus = remember(field.id) { FocusRequester() }
     val finishNext = onNext
     val finishDone = onDone
@@ -110,7 +111,7 @@ internal fun TvWebEditorDialog(
                         },
                         onImeAction = if (field.hasNext) finishNext else finishDone,
                         onMoveDown = { runCatching { actionFocus.requestFocus() } },
-                        tvFocusRequester = fieldFocus,
+                        tvFocusTarget = fieldFocus,
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -145,6 +146,6 @@ internal fun TvWebEditorDialog(
 
     LaunchedEffect(field.id) {
         delay(80)
-        runCatching { fieldFocus.requestFocus() }
+        runCatching { fieldFocus.requester.requestFocus() }
     }
 }

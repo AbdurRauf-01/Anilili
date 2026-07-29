@@ -48,6 +48,20 @@ class EpisodeDownloadsTest {
         assertFalse(EpisodeDownloads.canSaveToDevice(stream("https://embed.example/watch/1", "embed")))
     }
 
+    @Test
+    fun `only unfinished downloads expose the appropriate pause control`() {
+        val running = download(EpisodeDownloadState.DOWNLOADING)
+        val paused = download(EpisodeDownloadState.STOPPED)
+        val complete = download(EpisodeDownloadState.COMPLETED)
+
+        assertTrue(running.canPause)
+        assertFalse(running.canResume)
+        assertTrue(paused.canResume)
+        assertFalse(paused.canPause)
+        assertFalse(complete.canPause)
+        assertFalse(complete.canResume)
+    }
+
     private fun stream(
         url: String,
         type: String,
@@ -62,5 +76,22 @@ class EpisodeDownloadsTest {
         width = null,
         height = null,
         playlistKey = playlistKey,
+    )
+
+    private fun download(state: EpisodeDownloadState) = EpisodeDownload(
+        id = "episode:42:sub:1",
+        uri = "https://cdn.example/master.m3u8",
+        metadata = EpisodeDownloadMetadata(
+            anilistId = 42,
+            seriesTitle = "Example",
+            episodeNumber = "1",
+            provider = "example",
+            category = "sub",
+        ),
+        state = state,
+        percent = 20f,
+        bytesDownloaded = 1_024,
+        contentLength = 5_120,
+        updatedAtMs = 0,
     )
 }

@@ -15,6 +15,8 @@ import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.EpisodesResult
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.model.StreamItem
+import com.miruronative.data.model.SkipTimes
+import com.miruronative.data.model.hasUsableWindow
 import com.miruronative.data.remote.KonohaEpisode
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.UiState
@@ -27,9 +29,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.roundToInt
 
-/** How long a ready stream waits on the AniSkip lookup before starting without markers. */
-private const val ANISKIP_WAIT_MS = 2_500L
+/** Ignore short ad clips accidentally reported by an embed as its main video. */
+private const val MIN_SKIP_LOOKUP_DURATION_MS = 60_000L
 
 /**
  * How long the initial load waits on the Miruro pipe before proceeding with the fast Anivexa
@@ -47,6 +50,7 @@ data class WatchData(
     val anilistId: Int,
     val sources: SourcesResult,
     val chosenStream: StreamItem?,
+    val skipTimingStatus: SkipTimingStatus = SkipTimingStatus.WAITING_FOR_DURATION,
     val seriesTitle: String,
     val artworkUrl: String?,
     val seriesFormat: String? = null,
@@ -108,6 +112,13 @@ private data class EpisodeSourceKey(
     val category: Category,
 )
 
+private data class SkipLookupKey(
+    val episode: Double,
+    val provider: String,
+    val category: Category,
+    val durationSeconds: Int,
+)
+
 class WatchViewModel : ViewModel() {
     private val repo = AppGraph.repository
 
@@ -154,6 +165,8 @@ class WatchViewModel : ViewModel() {
     private var anivexaMergeJob: Job? = null
     private var miruroLateMergeJob: Job? = null
     private var sourceValidationJob: Job? = null
+    private var skipLookupJob: Job? = null
+    private var skipLookupKey: SkipLookupKey? = null
     private var mergedIncludesAnivexa = false
     private var mergedEpisodes = EpisodesResult(emptyList())
 
@@ -407,17 +420,15 @@ class WatchViewModel : ViewModel() {
 
     private suspend fun resolveAndPlay(number: Double) {
         failedStreamUrls.clear()
+        skipLookupJob?.cancel()
+        skipLookupJob = null
+        skipLookupKey = null
         val requestedProvider = preferred
         DiagnosticsLog.event(
             "Watch resolve start id=$anilistId episode=${fmt(number)} preferred=$requestedProvider " +
                 "category=${category.api} excluded=${failedProviders.joinToString()}",
         )
         lastRequestedNumber = number
-        // Fetched alongside source resolution: fills intro/outro markers for providers that
-        // don't ship their own, so auto-skip keeps working after a provider fallback.
-        val aniSkipFallback = viewModelScope.async {
-            runCatching { repo.skipTimes(anilistId, number) }.getOrNull()
-        }
         val previous = (_state.value as? UiState.Success)?.data
         _state.value = previous?.let { UiState.Success(it.copy(isResolving = true, notice = null)) }
             ?: UiState.Loading
@@ -457,7 +468,6 @@ class WatchViewModel : ViewModel() {
             unavailableSources += EpisodeSourceKey(number, provider, category)
         }
         if (resolved == null) {
-            aniSkipFallback.cancel()
             _loadingStatus.value = null
             val message = "No playable source for episode ${fmt(number)} on any server"
             DiagnosticsLog.event("Watch resolve no source id=$anilistId episode=${fmt(number)}")
@@ -494,12 +504,16 @@ class WatchViewModel : ViewModel() {
                     "episode=${fmt(number)}",
             )
         }
-        val sources = if (resolved.sources.skip == null) {
-            val fallbackSkip = withTimeoutOrNull(ANISKIP_WAIT_MS) { aniSkipFallback.await() }
-            fallbackSkip?.let { resolved.sources.copy(skip = it) } ?: resolved.sources
-        } else {
-            aniSkipFallback.cancel()
-            resolved.sources
+        // An empty provider `skipTimes: {}` is not capability. Normalise it to null so playback
+        // can ask AniSkip after the player reports the exact duration of this encode.
+        val sources = resolved.sources.let { providerSources ->
+            if (providerSources.skip?.hasUsableWindow() == true) providerSources
+            else providerSources.copy(skip = null)
+        }
+        val skipTimingStatus = when {
+            sources.skip != null -> SkipTimingStatus.PROVIDER
+            number % 1.0 != 0.0 -> SkipTimingStatus.UNAVAILABLE
+            else -> SkipTimingStatus.WAITING_FOR_DURATION
         }
         val index = spine.indexOfFirst { it.number == number }.coerceAtLeast(0)
         val resume = LibraryStore.historyFor(anilistId)?.takeIf { it.episodeNumber == number }?.positionMs ?: 0L
@@ -508,7 +522,8 @@ class WatchViewModel : ViewModel() {
             "Watch resolve success provider=${resolved.provider} episode=${fmt(number)} index=$index " +
                 "hls=${resolved.sources.hlsStreams.size} total=${resolved.sources.streams.size} " +
                 "embed=${resolved.sources.embedStreams.size} subtitles=${resolved.sources.subtitles.size} " +
-                "chosen=${chosen?.diagnosticLabel() ?: "none"} resumeMs=$resume",
+                "chosen=${chosen?.diagnosticLabel() ?: "none"} resumeMs=$resume " +
+                "skip=${skipTimingStatus.name.lowercase()} ${sources.skip.diagnosticSummary()}",
         )
         DiagnosticsLog.event(
             "Watch source inventory provider=${resolved.provider} " +
@@ -528,6 +543,7 @@ class WatchViewModel : ViewModel() {
                 anilistId = anilistId,
                 sources = sources,
                 chosenStream = chosen,
+                skipTimingStatus = skipTimingStatus,
                 seriesTitle = seriesTitle,
                 artworkUrl = artworkUrl,
                 seriesFormat = seriesFormat,
@@ -576,8 +592,13 @@ class WatchViewModel : ViewModel() {
         // first episode merely because that server/audio pair lacks the episode being watched.
         if (nextSpine.none { it.number == currentNumber }) return
 
+        // Steer this resolve at the server the viewer just picked. Keeping the pick out of
+        // `preferred` was what stopped it pinning the global preference, but `preferred` is also
+        // the only thing `resolveAndPlay` passes to the resolver — so the pick was dropped
+        // entirely and resolution fell back to whichever server answered first. Choosing a dub
+        // server that way kept landing on a sub-only server's stream, i.e. Japanese audio.
+        preferred = providerName
         if (rememberProvider) {
-            preferred = providerName
             globalPreferredProvider = providerName
             SettingsStore.setPreferredProvider(providerName)
         }
@@ -637,11 +658,78 @@ class WatchViewModel : ViewModel() {
         lastKnownPositionMs = positionMs
         lastKnownDurationMs = durationMs
         lastKnownNumber = data.current.number
+        maybeLoadSkipTiming(data, durationMs)
         maybeSyncAniListProgress(data.current.number, positionMs, durationMs)
         val now = System.currentTimeMillis()
         if (now - lastProgressSave < 8_000) return
         lastProgressSave = now
         LibraryStore.updateProgress(anilistId, data.current.number, positionMs, durationMs)
+    }
+
+    /**
+     * Providers frequently omit skip metadata, and different encodes can have different cuts.
+     * Wait until the active player knows its duration, then let AniSkip select the matching set.
+     * The lookup is background-only: it never holds up playback and can populate the button live.
+     */
+    private fun maybeLoadSkipTiming(data: WatchData, durationMs: Long) {
+        if (data.sources.skip?.hasUsableWindow() == true) return
+        if (data.current.number % 1.0 != 0.0 || durationMs < MIN_SKIP_LOOKUP_DURATION_MS) return
+        val durationSeconds = (durationMs / 1000.0).roundToInt().coerceAtLeast(1)
+        val key = SkipLookupKey(data.current.number, data.provider, data.category, durationSeconds)
+        if (skipLookupKey == key) return
+
+        skipLookupJob?.cancel()
+        skipLookupKey = key
+        DiagnosticsLog.event(
+            "Watch skip lookup start provider=${data.provider} episode=${data.current.displayNumber} " +
+                "durationSec=$durationSeconds",
+        )
+        _state.value = UiState.Success(data.copy(skipTimingStatus = SkipTimingStatus.CHECKING))
+        skipLookupJob = viewModelScope.launch {
+            val result = runCatching {
+                repo.skipTimes(anilistId, data.current.number, durationSeconds.toDouble())
+            }
+            if (skipLookupKey != key) return@launch
+            val current = (_state.value as? UiState.Success)?.data ?: return@launch
+            if (
+                current.current.number != key.episode ||
+                current.provider != key.provider ||
+                current.category != key.category
+            ) return@launch
+
+            result.onSuccess { skip ->
+                if (skip?.hasUsableWindow() == true) {
+                    DiagnosticsLog.event(
+                        "Watch skip lookup success provider=${key.provider} " +
+                            "episode=${current.current.displayNumber} durationSec=$durationSeconds " +
+                            skip.diagnosticSummary(),
+                    )
+                    _state.value = UiState.Success(
+                        current.copy(
+                            sources = current.sources.copy(skip = skip),
+                            skipTimingStatus = SkipTimingStatus.ANISKIP,
+                        ),
+                    )
+                } else {
+                    DiagnosticsLog.event(
+                        "Watch skip lookup unavailable provider=${key.provider} " +
+                            "episode=${current.current.displayNumber} durationSec=$durationSeconds",
+                    )
+                    _state.value = UiState.Success(
+                        current.copy(skipTimingStatus = SkipTimingStatus.UNAVAILABLE),
+                    )
+                }
+            }.onFailure { error ->
+                DiagnosticsLog.throwable(
+                    "Watch skip lookup failed provider=${key.provider} " +
+                        "episode=${current.current.displayNumber} durationSec=$durationSeconds",
+                    error,
+                )
+                _state.value = UiState.Success(
+                    current.copy(skipTimingStatus = SkipTimingStatus.SERVICE_ERROR),
+                )
+            }
+        }
     }
 
     /**
@@ -962,6 +1050,11 @@ internal fun shouldSyncAniListProgress(episodeNumber: Double, positionMs: Long, 
 private const val MIN_ANILIST_SYNC_DURATION_MS = 60_000L
 private const val ANILIST_SYNC_WATCHED_FRACTION = 0.80
 private const val SOURCE_VALIDATION_CONCURRENCY = 4
+
+private fun SkipTimes?.diagnosticSummary(): String = this?.let {
+    "intro=${it.introStart ?: "none"}-${it.introEnd ?: "none"} " +
+        "outro=${it.outroStart ?: "none"}-${it.outroEnd ?: "none"}"
+} ?: "intro=none outro=none"
 
 /** Provider-specific first-player policy, applied only after that provider has resolved sources. */
 internal fun pickProviderStream(provider: String, sources: SourcesResult): StreamItem? {

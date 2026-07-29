@@ -94,6 +94,7 @@ import com.miruronative.ui.components.EPISODE_BROWSER_MIN_EPISODES
 import com.miruronative.ui.components.EpisodeBrowserBar
 import com.miruronative.ui.components.FastScrollbar
 import com.miruronative.ui.components.EpisodeNumberChip
+import com.miruronative.ui.components.EpisodeArtwork
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.components.blockIndexContaining
@@ -102,6 +103,7 @@ import com.miruronative.ui.components.filterEpisodes
 import com.miruronative.ui.components.PullRefreshContainer
 import com.miruronative.ui.components.ScrollAwareTopBar
 import com.miruronative.ui.components.WatchProgressBar
+import com.miruronative.ui.components.episodeArtworkImage
 import com.miruronative.ui.components.episodeWatchFraction
 import java.time.Instant
 import java.time.ZoneId
@@ -323,6 +325,7 @@ private fun DetailContent(
     // Episode browsing. Query and range reset per season; a null range means "not chosen yet",
     // which is what lets the resumed episode's block be the one that opens.
     val episodeLayout by SettingsStore.episodeLayout.collectAsState()
+    val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
     var episodeQuery by remember(data.selectedSeasonId) { mutableStateOf("") }
     var chosenBlockIndex by remember(data.selectedSeasonId) { mutableStateOf<Int?>(null) }
     val blocks = remember(episodes) { episodeBlocks(episodes) }
@@ -460,6 +463,8 @@ private fun DetailContent(
                             DetailEpisodeRow(
                                 episode = episode,
                                 fallbackImage = seasonCover ?: info.bannerImage ?: info.coverImage.best,
+                                blurred = blurEpisodeImages,
+                                onBlurredChange = SettingsStore::setBlurEpisodeImages,
                                 watchedFraction = episodeWatchFraction(seasonResume, episode.number),
                                 downloadState = downloadBadges[
                                     EpisodeDownloads.idFor(info.id, "sub", episode.displayNumber)
@@ -921,12 +926,13 @@ private fun SeasonFilterRow(
 private fun DetailEpisodeRow(
     episode: EpisodeItem,
     fallbackImage: String?,
+    blurred: Boolean,
+    onBlurredChange: (Boolean) -> Unit,
     onClick: () -> Unit,
     watchedFraction: Float = 0f,
     downloadState: EpisodeDownloadUi? = null,
     modifier: Modifier = Modifier,
 ) {
-    val selectedImage = episode.image ?: fallbackImage
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -937,14 +943,17 @@ private fun DetailEpisodeRow(
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // The width belongs on the box, not the image: the progress bar below fills its parent,
-        // and an unconstrained box would take the whole row from the title beside it.
-        Box(Modifier.width(132.dp)) {
-            AsyncImage(
-                model = selectedImage,
-                contentDescription = null,
-                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp)),
-                contentScale = ContentScale.Crop,
+        Box(
+            Modifier
+                .width(132.dp)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(10.dp)),
+        ) {
+            EpisodeArtwork(
+                image = episodeArtworkImage(episode.image, fallbackImage),
+                blurred = blurred,
+                onBlurredChange = onBlurredChange,
+                modifier = Modifier.fillMaxSize(),
             )
             Text(
                 text = "EP ${episode.displayNumber}",

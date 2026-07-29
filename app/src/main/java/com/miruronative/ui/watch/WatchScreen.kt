@@ -143,11 +143,13 @@ import com.miruronative.ui.UiState
 import com.miruronative.ui.components.EPISODE_BROWSER_MIN_EPISODES
 import com.miruronative.ui.components.EpisodeBrowserBar
 import com.miruronative.ui.components.EpisodeNumberChip
+import com.miruronative.ui.components.EpisodeArtwork
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.components.blockIndexContaining
 import com.miruronative.ui.components.episodeBlocks
 import com.miruronative.ui.components.episodeWatchFraction
+import com.miruronative.ui.components.episodeArtworkImage
 import com.miruronative.ui.components.filterEpisodes
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
@@ -760,6 +762,7 @@ private fun WatchContent(
                                 qualityStreams = data.sources.embedStreams,
                                 startPositionMs = data.startPositionMs,
                                 skip = data.sources.skip,
+                                skipTimingStatus = data.skipTimingStatus,
                                 onPreviousEpisode = onPrev,
                                 onNextEpisode = onNext,
                                 hasPreviousEpisode = data.hasPrev,
@@ -774,6 +777,9 @@ private fun WatchContent(
                                 episodes = data.episodes,
                                 currentIndex = data.currentIndex,
                                 artworkUrl = data.artworkUrl,
+                                seriesTitle = data.seriesTitle,
+                                episodeTitle = data.current.distinctTitle
+                                    ?: "Episode ${data.current.displayNumber}",
                                 onSelectEpisode = onSelectEpisode,
                             )
                             // Embed players often use CSS "web fullscreen" that never reaches the
@@ -803,6 +809,7 @@ private fun WatchContent(
                         subtitles = data.sources.subtitles,
                         subtitleOffsetMs = data.sources.subtitleOffsetMs,
                         skip = data.sources.skip,
+                        skipTimingStatus = data.skipTimingStatus,
                         seriesTitle = data.seriesTitle,
                         episodeTitle = "Episode ${data.current.displayNumber}" +
                             (data.current.title?.let { ": $it" } ?: ""),
@@ -1584,6 +1591,7 @@ private fun MobileWatchDetails(
     }
     // Browsing state for long-runners; a null range opens on the block that is playing.
     val episodeLayout by SettingsStore.episodeLayout.collectAsState()
+    val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
     var episodeQuery by remember(data.anilistId) { mutableStateOf("") }
     var chosenBlockIndex by remember(data.anilistId) { mutableStateOf<Int?>(null) }
     val blocks = remember(data.episodes) { episodeBlocks(data.episodes) }
@@ -1683,6 +1691,8 @@ private fun MobileWatchDetails(
                 MobileEpisodeRow(
                     episode = episode,
                     fallbackImage = data.artworkUrl,
+                    blurred = blurEpisodeImages,
+                    onBlurredChange = SettingsStore::setBlurEpisodeImages,
                     selected = index == data.currentIndex,
                     watchedFraction = episodeWatchFraction(resume, episode.number),
                     downloadState = downloadBadges[
@@ -1708,6 +1718,8 @@ private fun MobileWatchDetails(
 private fun MobileEpisodeRow(
     episode: EpisodeItem,
     fallbackImage: String?,
+    blurred: Boolean,
+    onBlurredChange: (Boolean) -> Unit,
     selected: Boolean,
     onClick: () -> Unit,
     watchedFraction: Float = 0f,
@@ -1727,14 +1739,17 @@ private fun MobileEpisodeRow(
             .padding(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // The width belongs on the box, not the image: the progress bar below fills its parent,
-        // and an unconstrained box would take the whole row from the title beside it.
-        Box(Modifier.width(132.dp)) {
-            AsyncImage(
-                model = episode.image ?: fallbackImage,
-                contentDescription = null,
-                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(9.dp)),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+        Box(
+            Modifier
+                .width(132.dp)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(9.dp)),
+        ) {
+            EpisodeArtwork(
+                image = episodeArtworkImage(episode.image, fallbackImage),
+                blurred = blurred,
+                onBlurredChange = onBlurredChange,
+                modifier = Modifier.fillMaxSize(),
             )
             Text(
                 text = "EP ${episode.displayNumber}",

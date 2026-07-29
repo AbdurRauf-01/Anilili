@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -90,28 +91,38 @@ private fun ActiveOverlay(state: EpisodeDownloadUi, compact: Boolean) {
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                ProgressRing(
-                    progress = state.progress,
-                    modifier = Modifier.size(ringSize),
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                state.progress?.let {
-                    Text(
-                        "${(it * 100).toInt()}",
-                        style = if (compact) {
-                            MaterialTheme.typography.labelSmall
-                        } else {
-                            MaterialTheme.typography.labelMedium
-                        },
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
+                if (state.stage == EpisodeDownloadStage.PAUSED) {
+                    Icon(
+                        Icons.Default.Pause,
+                        contentDescription = "Download paused",
+                        tint = Color.White,
+                        modifier = Modifier.size(ringSize),
                     )
+                } else {
+                    ProgressRing(
+                        progress = state.progress,
+                        modifier = Modifier.size(ringSize),
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    state.progress?.let {
+                        Text(
+                            "${(it * 100).toInt()}",
+                            style = if (compact) {
+                                MaterialTheme.typography.labelSmall
+                            } else {
+                                MaterialTheme.typography.labelMedium
+                            },
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                        )
+                    }
                 }
             }
             if (!compact) {
                 Text(
                     when (state.stage) {
                         EpisodeDownloadStage.QUEUED -> "Queued"
+                        EpisodeDownloadStage.PAUSED -> "Paused"
                         EpisodeDownloadStage.CONVERTING -> "Converting"
                         else -> "Downloading"
                     },

@@ -28,6 +28,17 @@ class EpisodeDownloadUiTest {
     }
 
     @Test
+    fun `a stopped download is shown as paused with retained progress`() {
+        val badge = badges(
+            downloads = listOf(download(state = EpisodeDownloadState.STOPPED, percent = 37f)),
+        ).getValue(ID)
+
+        assertEquals(EpisodeDownloadStage.PAUSED, badge.stage)
+        assertEquals(0.37f, badge.progress!!, 0.001f)
+        assertTrue(badge.isBusy)
+    }
+
+    @Test
     fun `a running export outranks the completed download beneath it`() {
         val badge = badges(
             downloads = listOf(download(state = EpisodeDownloadState.COMPLETED, percent = 100f)),

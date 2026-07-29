@@ -3,10 +3,14 @@ package com.miruronative.ui.watch
 import android.view.KeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
@@ -25,15 +29,25 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.miruronative.ui.adaptive.focusHighlight
 
 import androidx.compose.material.icons.automirrored.filled.ViewList
@@ -89,6 +103,8 @@ internal fun opensTvPlayerControls(key: Key): Boolean = key == Key.DirectionLeft
 
 @Composable
 internal fun TvPlayerControls(
+    seriesTitle: String = "",
+    episodeTitle: String = "",
     positionMs: Long,
     durationMs: Long,
     isPlaying: Boolean,
@@ -112,68 +128,141 @@ internal fun TvPlayerControls(
     } else {
         0f
     }
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.78f))
-            .padding(horizontal = 28.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+    var focusedLabel by remember { mutableStateOf(if (isPlaying) "Pause" else "Play") }
+    val visibleFocusedLabel = if (focusedLabel == "Play" || focusedLabel == "Pause") {
+        if (isPlaying) "Pause" else "Play"
+    } else {
+        focusedLabel
+    }
+    val remainingMs = (durationMs - positionMs).coerceAtLeast(0L)
+
+    Box(modifier.fillMaxSize()) {
+        if (seriesTitle.isNotBlank() || episodeTitle.isNotBlank()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 32.dp, top = 28.dp)
+                    .widthIn(max = 620.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black.copy(alpha = 0.62f))
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (seriesTitle.isNotBlank()) {
+                    Text(
+                        text = seriesTitle,
+                        color = Color.White,
+                        fontSize = 22.sp,
+                        lineHeight = 25.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (episodeTitle.isNotBlank()) {
+                    Text(
+                        text = episodeTitle,
+                        color = Color.White.copy(alpha = 0.70f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        .32f to Color.Black.copy(alpha = 0.68f),
+                        1f to Color.Black.copy(alpha = 0.94f),
+                    ),
+                )
+                .padding(start = 32.dp, end = 32.dp, top = 30.dp, bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
-            Text(
-                text = "${formatTvPlayerTime(positionMs)} / ${formatTvPlayerTime(durationMs)}",
-                style = MaterialTheme.typography.labelLarge,
-                color = Color.White,
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth(),
             )
             Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TvControlButton("Previous episode", enabled = hasPrevious, onClick = onPrevious) {
+                Text(
+                    text = formatTvPlayerTime(positionMs),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White,
+                )
+                Text(
+                    text = visibleFocusedLabel,
+                    color = Color.White.copy(alpha = 0.78f),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "-${formatTvPlayerTime(remainingMs)}",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White.copy(alpha = 0.68f),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TvControlButton("Previous episode", enabled = hasPrevious, onFocused = { focusedLabel = it }, onClick = onPrevious) {
                     Icon(Icons.Default.SkipPrevious, contentDescription = null)
                 }
-                TvControlButton("Rewind 10 seconds", onClick = onRewind) {
+                TvControlButton("Rewind 10 seconds", onFocused = { focusedLabel = it }, onClick = onRewind) {
                     Icon(Icons.Default.FastRewind, contentDescription = null)
                 }
                 TvControlButton(
                     label = if (isPlaying) "Pause" else "Play",
                     onClick = onPlayPause,
+                    onFocused = { focusedLabel = it },
+                    large = true,
                     modifier = Modifier.focusRequester(playPauseFocusRequester),
                 ) {
-                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null)
+                    Icon(
+                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(34.dp),
+                    )
                 }
-                TvControlButton("Forward 10 seconds", onClick = onForward) {
+                TvControlButton("Forward 10 seconds", onFocused = { focusedLabel = it }, onClick = onForward) {
                     Icon(Icons.Default.FastForward, contentDescription = null)
                 }
-                TvControlButton("Next episode", enabled = hasNext, onClick = onNext) {
+                TvControlButton("Next episode", enabled = hasNext, onFocused = { focusedLabel = it }, onClick = onNext) {
                     Icon(Icons.Default.SkipNext, contentDescription = null)
                 }
                 onEpisodes?.let { callback ->
-                    TvControlButton("Episode list", onClick = callback) {
+                    TvControlButton("Episode list", onFocused = { focusedLabel = it }, onClick = callback) {
                         Icon(Icons.AutoMirrored.Filled.ViewList, contentDescription = null)
                     }
                 }
-                TvControlButton(if (isMuted) "Unmute" else "Mute", onClick = onToggleMute) {
+                TvControlButton(
+                    if (isMuted) "Unmute" else "Mute",
+                    onFocused = { focusedLabel = it },
+                    onClick = onToggleMute,
+                ) {
                     Icon(
                         if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = null,
                     )
                 }
                 onSettings?.let { callback ->
-                    TvControlButton("Playback settings", onClick = callback) {
+                    TvControlButton("Playback settings", onFocused = { focusedLabel = it }, onClick = callback) {
                         Icon(Icons.Default.Settings, contentDescription = null)
                     }
                 }
                 onFullscreen?.let { callback ->
-                    TvControlButton("Toggle fullscreen", onClick = callback) {
+                    TvControlButton("Toggle fullscreen", onFocused = { focusedLabel = it }, onClick = callback) {
                         Icon(Icons.Default.Fullscreen, contentDescription = null)
                     }
                 }
@@ -186,6 +275,8 @@ internal fun TvPlayerControls(
 private fun TvControlButton(
     label: String,
     enabled: Boolean = true,
+    large: Boolean = false,
+    onFocused: (String) -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     icon: @Composable () -> Unit,
@@ -194,8 +285,10 @@ private fun TvControlButton(
         onClick = onClick,
         enabled = enabled,
         modifier = modifier
+            .size(if (large) 62.dp else 48.dp)
+            .onFocusChanged { if (it.isFocused) onFocused(label) }
             .semantics { contentDescription = label }
-            .focusHighlight(RoundedCornerShape(28.dp), focusedScale = 1.12f),
+            .focusHighlight(RoundedCornerShape(32.dp), focusedScale = if (large) 1.15f else 1.10f),
     ) {
         icon()
     }

@@ -43,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToLong
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
@@ -478,15 +479,26 @@ class MiruroRepository(
         ) { withContext(Dispatchers.IO) { jikan.fillerEpisodes(malId) } }
     }
 
-    /** Community intro/outro markers via AniSkip; cached, null when unknown or on failure. */
-    suspend fun skipTimes(anilistId: Int, episode: Double): SkipTimes? {
+    /** Community intro/outro markers via AniSkip; cached when known, with service failures exposed. */
+    suspend fun skipTimes(
+        anilistId: Int,
+        episode: Double,
+        episodeLengthSeconds: Double = 0.0,
+    ): SkipTimes? {
         if (episode % 1.0 != 0.0 || episode < 1) return null
+        if (!episodeLengthSeconds.isFinite() || episodeLengthSeconds < 0.0) return null
         val malId = animeInfo(anilistId)?.idMal?.takeIf { it > 0 } ?: return null
+        val durationMs = (episodeLengthSeconds * 1000.0).roundToLong()
         return cache.getOrFetch(
-            key = "aniskip:$malId:${episode.toInt()}",
+            key = "aniskip:v2:$malId:${episode.toInt()}:$durationMs",
             serializer = SkipTimes.serializer().nullable,
             ttlMs = OPTIONS_TTL,
-        ) { withContext(Dispatchers.IO) { runCatching { aniSkip.skipTimes(malId, episode.toInt()) }.getOrNull() } }
+            cacheIf = { it != null },
+        ) {
+            withContext(Dispatchers.IO) {
+                aniSkip.skipTimes(malId, episode.toInt(), episodeLengthSeconds)
+            }
+        }
     }
 
     suspend fun animeInfo(id: Int, force: Boolean = false): Media? = cache.getOrFetch(

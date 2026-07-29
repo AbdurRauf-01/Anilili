@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -66,8 +67,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -76,11 +79,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.model.Media
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
+import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.adaptive.TvNativeTextField
 import com.miruronative.ui.adaptive.TvTextInputType
 import com.miruronative.ui.adaptive.focusHighlight
@@ -88,6 +93,7 @@ import com.miruronative.ui.components.AnimeCard
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.components.PullRefreshContainer
+import com.miruronative.ui.components.RatingBadge
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -96,7 +102,7 @@ fun SearchScreen(
     onAnimeClick: (Int) -> Unit,
     modifier: Modifier = Modifier,
     vm: SearchViewModel = viewModel(),
-    tvFieldFocusRequester: FocusRequester? = null,
+    tvFieldFocusTarget: TvFocusTarget? = null,
     initialStudioId: Int? = null,
     initialStudioName: String? = null,
     initialGenre: String? = null,
@@ -136,7 +142,7 @@ fun SearchScreen(
                     vm = vm,
                     options = options,
                     onOpenFilters = { showFilters = true },
-                    tvFieldFocusRequester = tvFieldFocusRequester,
+                    tvFieldFocusTarget = tvFieldFocusTarget,
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .7f))
             }
@@ -180,7 +186,7 @@ private fun SearchTopBar(
     vm: SearchViewModel,
     options: DiscoverOptions,
     onOpenFilters: () -> Unit,
-    tvFieldFocusRequester: FocusRequester?,
+    tvFieldFocusTarget: TvFocusTarget?,
 ) {
     val device = LocalAppDeviceProfile.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -237,7 +243,7 @@ private fun SearchTopBar(
                             focusManager.moveFocus(FocusDirection.Down)
                         },
                         onMoveDown = { focusManager.moveFocus(FocusDirection.Down) },
-                        tvFocusRequester = tvFieldFocusRequester,
+                        tvFocusTarget = tvFieldFocusTarget,
                     )
                 } else {
                     OutlinedTextField(
@@ -452,7 +458,7 @@ private fun ResultsGrid(
     onLoadMore: () -> Unit,
 ) {
     val device = LocalAppDeviceProfile.current
-    val tileMinWidth = if (device.isTv) 118.dp else device.gridMinWidth
+    val tileMinWidth = if (device.isTv) 220.dp else device.gridMinWidth
     if (results.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -481,10 +487,11 @@ private fun ResultsGrid(
         LaunchedEffect(focusedResultIndex, columnCount, device.isTv) {
             val resultIndex = focusedResultIndex ?: return@LaunchedEffect
             if (device.isTv && resultIndex >= columnCount) {
-                val rowStart = (resultIndex / columnCount) * columnCount
                 // Keep the focused TV row together instead of exposing the previous row's
-                // detached title and metadata strip above it.
-                gridState.scrollToItem(rowStart + 1)
+                // detached title and metadata strip above it. TV has no in-grid header item, so
+                // a result's index is its grid index — no +1 offset the way the phone list needs.
+                val rowStart = (resultIndex / columnCount) * columnCount
+                gridState.scrollToItem(rowStart)
             }
         }
 
@@ -495,57 +502,133 @@ private fun ResultsGrid(
             if (lastVisibleIndex >= results.size - columnCount * 2) onLoadMore()
         }
 
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(tileMinWidth),
-            state = gridState,
-            contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 14.dp),
-            horizontalArrangement = Arrangement.spacedBy(horizontalSpacing),
-            verticalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 14.dp),
-        ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Row(
-                    Modifier.fillMaxWidth().padding(bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        when {
-                            filters.query.isNotBlank() -> "Results for “${filters.query}”"
-                            !filters.studioName.isNullOrBlank() -> "Anime by ${filters.studioName}"
-                            else -> "Discover anime"
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        SearchViewModel.SORTS.firstOrNull { it.value == filters.sort }?.label.orEmpty(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            gridItemsIndexed(results, key = { _, media -> media.id }) { index, media ->
-                AnimeCard(
-                    media = media,
-                    onClick = { onAnimeClick(media.id) },
-                    modifier = if (device.isTv) {
-                        Modifier.onFocusChanged { state ->
-                            if (state.isFocused) focusedResultIndex = index
+        Column(Modifier.fillMaxSize()) {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(tileMinWidth),
+                state = gridState,
+                contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(horizontalSpacing),
+                verticalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 14.dp),
+            ) {
+                if (!device.isTv) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(bottom = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                when {
+                                    filters.query.isNotBlank() -> "Results for “${filters.query}”"
+                                    !filters.studioName.isNullOrBlank() -> "Anime by ${filters.studioName}"
+                                    else -> "Discover anime"
+                                },
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                SearchViewModel.SORTS.firstOrNull { it.value == filters.sort }?.label.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
+                    }
+                }
+                gridItemsIndexed(results, key = { _, media -> media.id }) { index, media ->
+                    if (device.isTv) {
+                        TvSearchResultCard(
+                            media = media,
+                            onClick = { onAnimeClick(media.id) },
+                            modifier = Modifier.onFocusChanged { state ->
+                                if (state.isFocused) focusedResultIndex = index
+                            },
+                        )
                     } else {
-                        Modifier
-                    },
-                )
-            }
-            if (isLoadingMore) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                        AnimeCard(
+                            media = media,
+                            onClick = { onAnimeClick(media.id) },
+                        )
+                    }
+                }
+                if (isLoadingMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Search controls consume most of a TV's vertical space, especially at 720p. A portrait card puts
+ * its title below a tall 2:3 poster, which leaves only the image inside the results viewport. TV
+ * search therefore uses a landscape tile with its identifying text inside the artwork itself.
+ */
+@Composable
+private fun TvSearchResultCard(
+    media: Media,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .focusHighlight(shape, focusedScale = 1.045f)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClickLabel = "Open ${media.title.preferred}", onClick = onClick),
+    ) {
+        AsyncImage(
+            model = media.bannerImage ?: media.coverImage.best,
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Black.copy(alpha = .84f),
+                        .44f to Color.Transparent,
+                        1f to Color.Black.copy(alpha = .72f),
+                    ),
+                ),
+        )
+        media.averageScore?.let { score ->
+            RatingBadge(score, Modifier.align(Alignment.TopEnd).padding(7.dp))
+        }
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .padding(start = 9.dp, top = 9.dp, end = 58.dp),
+        ) {
+            Text(
+                text = media.title.preferred,
+                color = Color.White,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = listOfNotNull(
+                    media.format?.replace('_', ' '),
+                    media.seasonYear?.toString(),
+                ).joinToString("  ·  "),
+                color = Color.White.copy(alpha = .72f),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

@@ -120,6 +120,7 @@ fun SettingsScreen(
     val downloadDestination by SettingsStore.downloadDestination.collectAsState()
     val releaseNotifications by SettingsStore.releaseNotifications.collectAsState()
     val hideAdultContent by SettingsStore.hideAdultContent.collectAsState()
+    val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
     val subtitlesWithDub by SettingsStore.subtitlesWithDub.collectAsState()
     val updateCheckOnLaunch by SettingsStore.updateCheckOnLaunch.collectAsState()
     val syncSavedToAniList by SettingsStore.syncSavedToAniList.collectAsState()
@@ -320,8 +321,8 @@ fun SettingsScreen(
             item {
                 SettingSwitch(
                     "Player touch gestures",
-                    "Swipe the left edge for brightness, the right for volume, across for seek. " +
-                        "Tap to show the controls either way.",
+                    "Swipe the left half for brightness, the right half for volume, across for " +
+                        "seek. Tap to show the controls either way.",
                     playerGestures,
                     SettingsStore::setPlayerGestures,
                 )
@@ -399,6 +400,14 @@ fun SettingsScreen(
                 expanded = "Content" in expandedSections,
                 onToggle = { toggleSection("Content") },
             ) {
+            item {
+                SettingSwitch(
+                    "Blur episode images",
+                    "Hide possible spoilers. You can also tap any episode image to toggle this everywhere.",
+                    blurEpisodeImages,
+                    SettingsStore::setBlurEpisodeImages,
+                )
+            }
             item {
                 SettingSwitch(
                     "Hide adult content",

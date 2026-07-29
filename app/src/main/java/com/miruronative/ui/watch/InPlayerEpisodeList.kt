@@ -40,6 +40,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,13 +60,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
 import com.miruronative.data.model.EpisodeItem
+import com.miruronative.data.settings.SettingsStore
 import com.miruronative.ui.adaptive.focusHighlight
+import com.miruronative.ui.components.EpisodeArtwork
 import com.miruronative.ui.components.EpisodeBlockPicker
 import com.miruronative.ui.components.EqualizerWaveIndicator
 import com.miruronative.ui.components.FastScrollbar
 import com.miruronative.ui.components.blockIndexContaining
+import com.miruronative.ui.components.episodeArtworkImage
 import com.miruronative.ui.components.episodeBlocks
 
 @Composable
@@ -78,6 +81,7 @@ internal fun InPlayerEpisodeDrawer(
     modifier: Modifier = Modifier,
 ) {
     BackHandler(onBack = onDismiss)
+    val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
 
     var chosenBlockIndex by remember(episodes) { mutableStateOf<Int?>(null) }
     val blocks = remember(episodes) { episodeBlocks(episodes) }
@@ -169,6 +173,8 @@ internal fun InPlayerEpisodeDrawer(
                                 InPlayerEpisodeItemRow(
                                     episode = episode,
                                     artworkUrl = artworkUrl,
+                                    blurred = blurEpisodeImages,
+                                    onBlurredChange = SettingsStore::setBlurEpisodeImages,
                                     isCurrent = isCurrent,
                                     focusRequester = itemFocusRequester,
                                     onClick = {
@@ -203,6 +209,8 @@ internal fun InPlayerEpisodeDrawer(
                                         InPlayerEpisodeItemRow(
                                             episode = episode,
                                             artworkUrl = artworkUrl,
+                                            blurred = blurEpisodeImages,
+                                            onBlurredChange = SettingsStore::setBlurEpisodeImages,
                                             isCurrent = isCurrent,
                                             focusRequester = itemFocusRequester,
                                             onClick = {
@@ -281,6 +289,8 @@ private fun SeasonHeaderRow(
 private fun InPlayerEpisodeItemRow(
     episode: EpisodeItem,
     artworkUrl: String?,
+    blurred: Boolean,
+    onBlurredChange: (Boolean) -> Unit,
     isCurrent: Boolean,
     focusRequester: FocusRequester,
     onClick: () -> Unit,
@@ -334,10 +344,12 @@ private fun InPlayerEpisodeItemRow(
                 .background(Color.Black.copy(alpha = 0.4f)),
             contentAlignment = Alignment.Center,
         ) {
-            AsyncImage(
-                model = episode.image ?: artworkUrl,
-                contentDescription = null,
+            EpisodeArtwork(
+                image = episodeArtworkImage(episode.image, artworkUrl),
+                blurred = blurred,
+                onBlurredChange = onBlurredChange,
                 contentScale = ContentScale.Crop,
+                compact = true,
                 modifier = Modifier.fillMaxSize(),
             )
             if (isCurrent) {

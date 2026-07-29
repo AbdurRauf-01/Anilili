@@ -80,6 +80,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.SkipTimes
+import com.miruronative.data.model.hasUsableWindow
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.settings.CaptionEdgeStyle
 import com.miruronative.data.settings.CaptionStyle
@@ -111,6 +112,11 @@ fun EmbedWebView(
     qualityStreams: List<StreamItem> = emptyList(),
     startPositionMs: Long = 0L,
     skip: SkipTimes? = null,
+    skipTimingStatus: SkipTimingStatus = if (skip?.hasUsableWindow() == true) {
+        SkipTimingStatus.PROVIDER
+    } else {
+        SkipTimingStatus.UNAVAILABLE
+    },
     onPreviousEpisode: (() -> Unit)? = null,
     onNextEpisode: (() -> Unit)? = null,
     hasPreviousEpisode: Boolean = false,
@@ -125,6 +131,8 @@ fun EmbedWebView(
     episodes: List<EpisodeItem> = emptyList(),
     currentIndex: Int = 0,
     artworkUrl: String? = null,
+    seriesTitle: String = "",
+    episodeTitle: String = "",
     onSelectEpisode: ((Int) -> Unit)? = null,
 ) {
     val device = LocalAppDeviceProfile.current
@@ -208,6 +216,46 @@ fun EmbedWebView(
     val outroEndMs = skip?.outroEnd?.times(1000)?.toLong()
     var introAutoSkipped by remember(activeUrl, introStartMs, introEndMs) { mutableStateOf(false) }
     var outroAutoHandled by remember(activeUrl, outroStartMs, outroEndMs) { mutableStateOf(false) }
+    var pendingSkipTargetMs by remember(activeUrl) { mutableStateOf<Long?>(null) }
+    val requestSkipSeek: (Long, String) -> Unit = { targetMs, trigger ->
+        if (webView == null) {
+            DiagnosticsLog.event(
+                "EmbedWebView skip seek rejected trigger=$trigger targetMs=$targetMs webView=none",
+            )
+        } else {
+            pendingSkipTargetMs = targetMs
+            DiagnosticsLog.event(
+                "EmbedWebView skip seek requested trigger=$trigger positionMs=$positionMs targetMs=$targetMs",
+            )
+            seekWebVideo(webView, targetMs)
+        }
+    }
+    LaunchedEffect(activeUrl, skipTimingStatus, introStartMs, introEndMs, outroStartMs, outroEndMs) {
+        DiagnosticsLog.event(
+            "EmbedWebView skip metadata status=${skipTimingStatus.name.lowercase()} " +
+                "introMs=$introStartMs-${introEndMs ?: "none"} " +
+                "outroMs=${outroStartMs ?: "none"}-${outroEndMs ?: "none"}",
+        )
+    }
+    LaunchedEffect(positionMs, pendingSkipTargetMs) {
+        val targetMs = pendingSkipTargetMs ?: return@LaunchedEffect
+        if (positionMs in (targetMs - 2_500L).coerceAtLeast(0L)..(targetMs + 5_000L)) {
+            DiagnosticsLog.event(
+                "EmbedWebView skip seek confirmed positionMs=$positionMs targetMs=$targetMs",
+            )
+            pendingSkipTargetMs = null
+        }
+    }
+    LaunchedEffect(pendingSkipTargetMs) {
+        val targetMs = pendingSkipTargetMs ?: return@LaunchedEffect
+        delay(5_000)
+        if (pendingSkipTargetMs == targetMs) {
+            DiagnosticsLog.event(
+                "EmbedWebView skip seek unconfirmed positionMs=$positionMs targetMs=$targetMs",
+            )
+            pendingSkipTargetMs = null
+        }
+    }
     val queueTvSeek: (Long) -> Unit = { offsetMs ->
         val targetMs = tvSeekTargetMs(
             currentPositionMs = pendingTvSeekTargetMs ?: positionMs,
@@ -567,7 +615,7 @@ fun EmbedWebView(
 
         if (!introAutoSkipped && isInSkipWindow(positionMs, introStartMs, introEndMs)) {
             introAutoSkipped = true
-            seekWebVideo(webView, introEndMs)
+            requestSkipSeek(introEndMs ?: return@LaunchedEffect, "auto-intro")
             return@LaunchedEffect
         }
 
@@ -825,7 +873,8 @@ fun EmbedWebView(
         // Swallows every touch so the page never sees one: web players only raise their control
         // chrome on interaction, so starving them of taps keeps the provider UI hidden and lets
         // our overlay be the only controls. Also neuters tap-hijack ads, which need a real click.
-        // Horizontal drag seeks; vertical edge drags control brightness and volume.
+        // Horizontal drag seeks; a vertical drag controls brightness on the left half of the
+        // screen and volume on the right.
         if (touchControlsActive) PlayerGestureControls(
             positionMs = positionMs,
             durationMs = durationMs,
@@ -945,6 +994,7 @@ fun EmbedWebView(
                 },
                 autoSkip = autoSkipIntroOutro,
                 onAutoSkipChange = SettingsStore::setAutoSkipIntroOutro,
+                skipTimingStatus = skipTimingStatus,
             )
         }
 
@@ -1012,6 +1062,8 @@ fun EmbedWebView(
 
         if (device.isTv && focusPlayerOnStart && tvControlsVisible) {
             TvPlayerControls(
+                seriesTitle = seriesTitle,
+                episodeTitle = episodeTitle,
                 positionMs = positionMs,
                 durationMs = durationMs,
                 isPlaying = webIsPlaying,
@@ -1055,7 +1107,7 @@ fun EmbedWebView(
                     }
                 } else null,
                 onFullscreen = onToggleFullscreen,
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier.fillMaxSize(),
             )
         }
 
@@ -1083,13 +1135,19 @@ fun EmbedWebView(
         val action: Pair<String, () -> Unit>? = when {
             !skipAvailable -> null
             introEndMs != null && isInSkipWindow(positionMs, introStartMs, introEndMs) ->
-                "Skip Intro" to { seekWebVideo(webView, introEndMs) }
+                "Skip Intro" to { requestSkipSeek(introEndMs, "manual-intro") }
             outroStartMs != null &&
                 outroEndMs != null &&
                 currentOnNextEpisode != null &&
                 isInSkipWindow(positionMs, outroStartMs, outroEndMs) ->
                 "Next Episode" to { currentOnNextEpisode?.invoke() }
             else -> null
+        }
+        LaunchedEffect(action?.first, activeUrl) {
+            DiagnosticsLog.event(
+                "EmbedWebView skip action=${action?.first ?: "none"} positionMs=$positionMs " +
+                    "durationMs=$durationMs status=${skipTimingStatus.name.lowercase()}",
+            )
         }
         action?.let { (label, onClick) ->
             // Same dodge the native player makes: the bottom-left corner is where the bar draws its
@@ -1392,6 +1450,10 @@ internal val HIDE_PROVIDER_CHROME_JS = """
       css += 'video::-webkit-media-controls{display:none!important;}';
       css += 'video::-webkit-media-controls-enclosure{display:none!important;}';
       css += 'video::-webkit-media-controls-panel{display:none!important;}';
+      // Several providers ship a white page body. The WebView underneath is black, but the page
+      // paints over it, so any strip the video does not cover — below a 16:9 player on a taller
+      // screen, or the letterbox around a differently-shaped one — came out as a white band.
+      css += 'html,body{background:#000!important;}';
 
       function installStyle() {
         var parent = document.head || document.documentElement;

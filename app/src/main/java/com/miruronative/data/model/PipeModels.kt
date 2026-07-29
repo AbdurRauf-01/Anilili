@@ -99,6 +99,19 @@ data class SkipTimes(
     val outroEnd: Double?,
 )
 
+/**
+ * Whether these timestamps can produce at least one action in the player.
+ *
+ * Some provider payloads contain an empty `skipTimes: {}` object. Treating that object as real
+ * metadata prevents the AniSkip fallback from running even though neither player can render a
+ * button from it.
+ */
+fun SkipTimes.hasUsableWindow(): Boolean {
+    val introUsable = introEnd?.let { end -> end > (introStart ?: 0.0) } == true
+    val outroUsable = outroStart?.let { start -> outroEnd?.let { end -> end > start } } == true
+    return introUsable || outroUsable
+}
+
 data class SourcesResult(
     val streams: List<StreamItem>,
     val subtitles: List<SubtitleItem>,

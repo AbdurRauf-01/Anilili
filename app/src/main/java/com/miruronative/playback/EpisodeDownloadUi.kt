@@ -1,7 +1,7 @@
 package com.miruronative.playback
 
 /** What an episode's cover should be saying about its download, in the order the stages happen. */
-enum class EpisodeDownloadStage { QUEUED, DOWNLOADING, CONVERTING, SAVED, FAILED }
+enum class EpisodeDownloadStage { QUEUED, DOWNLOADING, PAUSED, CONVERTING, SAVED, FAILED }
 
 data class EpisodeDownloadUi(
     val stage: EpisodeDownloadStage,
@@ -31,6 +31,7 @@ fun episodeDownloadBadges(
     downloads.forEach { download ->
         val stage = when (download.state) {
             EpisodeDownloadState.DOWNLOADING -> EpisodeDownloadStage.DOWNLOADING
+            EpisodeDownloadState.STOPPED -> EpisodeDownloadStage.PAUSED
             EpisodeDownloadState.FAILED -> EpisodeDownloadStage.FAILED
             EpisodeDownloadState.COMPLETED -> EpisodeDownloadStage.SAVED
             EpisodeDownloadState.REMOVING -> return@forEach
@@ -39,7 +40,7 @@ fun episodeDownloadBadges(
         badges[download.id] = EpisodeDownloadUi(
             stage = stage,
             progress = download.percent
-                ?.takeIf { stage == EpisodeDownloadStage.DOWNLOADING }
+                ?.takeIf { stage == EpisodeDownloadStage.DOWNLOADING || stage == EpisodeDownloadStage.PAUSED }
                 ?.let { (it / 100f).coerceIn(0f, 1f) }
                 ?: 1f.takeIf { stage == EpisodeDownloadStage.SAVED },
         )

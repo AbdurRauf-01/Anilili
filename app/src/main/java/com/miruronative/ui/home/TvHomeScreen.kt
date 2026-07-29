@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.miruronative.ui.home
 
 import androidx.compose.animation.core.animateFloatAsState
@@ -48,10 +50,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -68,8 +72,11 @@ import com.miruronative.R
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.model.Media
+import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.adaptive.focusHighlight
+import com.miruronative.ui.adaptive.tvFocusTarget
 import com.miruronative.ui.components.ContinueWatchingActionsDialog
+import com.miruronative.ui.components.TvHeroArtwork
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
@@ -82,7 +89,7 @@ private const val TV_HERO_AUTO_ADVANCE_MS = 7_000L
  * Cinematic 10-foot Home surface. This deliberately lives beside the existing responsive Home
  * implementation so phone and tablet layouts remain unchanged.
  */
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
 internal fun TvHomeContent(
     data: HomeData,
@@ -90,7 +97,7 @@ internal fun TvHomeContent(
     onAnimeClick: (Int) -> Unit,
     onWatchNow: (Int) -> Unit,
     onResume: (HistoryEntry) -> Unit,
-    primaryActionFocusRequester: FocusRequester? = null,
+    primaryActionFocusTarget: TvFocusTarget? = null,
     modifier: Modifier = Modifier,
 ) {
     val spotlight = data.spotlight.take(7)
@@ -114,6 +121,23 @@ internal fun TvHomeContent(
     }
 
     val listState = rememberLazyListState()
+    val lastRailKey = remember(
+        history.isNotEmpty(),
+        data.spotlight.isNotEmpty(),
+        data.newest.isNotEmpty(),
+        data.popular.isNotEmpty(),
+        data.movies.isNotEmpty(),
+        data.topRated.isNotEmpty(),
+    ) {
+        lastTvHomeRailKey(
+            hasHistory = history.isNotEmpty(),
+            hasTrending = data.spotlight.isNotEmpty(),
+            hasNewest = data.newest.isNotEmpty(),
+            hasPopular = data.popular.isNotEmpty(),
+            hasMovies = data.movies.isNotEmpty(),
+            hasTopRated = data.topRated.isNotEmpty(),
+        )
+    }
 
     LaunchedEffect(heroHasFocus) {
         if (heroHasFocus) {
@@ -144,7 +168,7 @@ internal fun TvHomeContent(
                         onWatchNow = onWatchNow,
                         onAnimeClick = onAnimeClick,
                         onFocusChanged = { heroHasFocus = it },
-                        primaryActionFocusRequester = primaryActionFocusRequester,
+                        primaryActionFocusTarget = primaryActionFocusTarget,
                     )
                 }
             }
@@ -153,6 +177,7 @@ internal fun TvHomeContent(
                     TvContinueRail(
                         history = history.take(12),
                         onResume = onResume,
+                        blockDown = lastRailKey == "continue-watching",
                     )
                 }
             }
@@ -163,6 +188,7 @@ internal fun TvHomeContent(
                         media = data.spotlight,
                         onAnimeClick = onAnimeClick,
                         onPreview = { railPreview = it },
+                        blockDown = lastRailKey == "trending",
                     )
                 }
             }
@@ -173,6 +199,7 @@ internal fun TvHomeContent(
                         media = data.newest,
                         onAnimeClick = onAnimeClick,
                         onPreview = { railPreview = it },
+                        blockDown = lastRailKey == "newest",
                     )
                 }
             }
@@ -183,6 +210,7 @@ internal fun TvHomeContent(
                         media = data.popular,
                         onAnimeClick = onAnimeClick,
                         onPreview = { railPreview = it },
+                        blockDown = lastRailKey == "popular",
                     )
                 }
             }
@@ -193,6 +221,7 @@ internal fun TvHomeContent(
                         media = data.movies,
                         onAnimeClick = onAnimeClick,
                         onPreview = { railPreview = it },
+                        blockDown = lastRailKey == "movies",
                     )
                 }
             }
@@ -203,6 +232,7 @@ internal fun TvHomeContent(
                         media = data.topRated,
                         onAnimeClick = onAnimeClick,
                         onPreview = { railPreview = it },
+                        blockDown = lastRailKey == "top-rated",
                     )
                 }
             }
@@ -218,7 +248,7 @@ private fun TvHero(
     onWatchNow: (Int) -> Unit,
     onAnimeClick: (Int) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
-    primaryActionFocusRequester: FocusRequester?,
+    primaryActionFocusTarget: TvFocusTarget?,
 ) {
     val resume = LibraryStore.historyFor(media.id)
     val description = remember(media.description) {
@@ -229,25 +259,15 @@ private fun TvHero(
             ?.trim()
             .orEmpty()
     }
-    val image = media.heroImage
-
     Box(
         Modifier
             .fillMaxWidth()
             .height(390.dp)
             .focusGroup(),
     ) {
-        AsyncImage(
-            model = image,
-            contentDescription = null,
+        TvHeroArtwork(
+            media = media,
             modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-            // TopCenter suits both shapes this falls back through. A 1900x400 banner is wider than
-            // this box, so Crop trims horizontally and the *horizontal* half of the alignment
-            // decides: CenterEnd pinned it to the banner's far right, which is usually empty sky.
-            // A portrait cover (no banner available) is narrower, so Crop trims vertically and the
-            // *vertical* half decides: centre landed on a torso, top lands on faces.
-            alignment = Alignment.TopCenter,
         )
         Box(
             Modifier.fillMaxSize().background(
@@ -341,10 +361,7 @@ private fun TvHero(
                     ),
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
                     modifier = Modifier
-                        .then(
-                            primaryActionFocusRequester?.let { Modifier.focusRequester(it) }
-                                ?: Modifier,
-                        )
+                        .tvFocusTarget(primaryActionFocusTarget)
                         .onFocusChanged { onFocusChanged(it.hasFocus) }
                         .focusHighlight(RoundedCornerShape(12.dp), focusedScale = 1.04f),
                 ) {
@@ -446,19 +463,44 @@ private fun TvMediaRail(
     media: List<Media>,
     onAnimeClick: (Int) -> Unit,
     onPreview: (Media?) -> Unit,
+    blockDown: Boolean,
 ) {
+    val shownMedia = media.take(20)
+    val mediaIds = shownMedia.map(Media::id)
+    var lastFocusedIndex by remember(mediaIds) { mutableIntStateOf(0) }
+    val itemFocusTargets = remember(mediaIds) { List(shownMedia.size) { TvFocusTarget() } }
     Column {
         TvRailTitle(title)
         LazyRow(
-            modifier = Modifier.focusGroup(),
+            modifier = Modifier
+                .focusProperties {
+                    enter = {
+                        rememberedTvRailRequester(itemFocusTargets, lastFocusedIndex)
+                    }
+                }
+                .focusGroup(),
             contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            items(media.take(20), key = { it.id }) { item ->
+            itemsIndexed(shownMedia, key = { _, item -> item.id }) { index, item ->
                 TvMediaCard(
                     media = item,
                     onClick = { onAnimeClick(item.id) },
-                    onFocused = { focused -> if (focused) onPreview(item) },
+                    onFocused = { focused ->
+                        if (focused) {
+                            lastFocusedIndex = index
+                            onPreview(item)
+                        }
+                    },
+                    modifier = Modifier
+                        .tvFocusTarget(itemFocusTargets[index])
+                        .then(
+                            if (blockDown) {
+                                Modifier.focusProperties { down = FocusRequester.Cancel }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 )
             }
         }
@@ -470,13 +512,14 @@ private fun TvMediaCard(
     media: Media,
     onClick: () -> Unit,
     onFocused: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-media-card-scale")
     val image = media.heroImage
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .width(TvRailCardWidth)
             .zIndex(if (focused) 1f else 0f)
             .scale(scale)
@@ -566,24 +609,45 @@ private fun TvMediaCard(
 private fun TvContinueRail(
     history: List<HistoryEntry>,
     onResume: (HistoryEntry) -> Unit,
+    blockDown: Boolean,
 ) {
     var managedEntry by remember { mutableStateOf<HistoryEntry?>(null) }
     managedEntry?.let { entry ->
         ContinueWatchingActionsDialog(entry = entry, onDismiss = { managedEntry = null })
     }
 
+    val historyIds = history.map(HistoryEntry::anilistId)
+    var lastFocusedIndex by remember(historyIds) { mutableIntStateOf(0) }
+    val itemFocusTargets = remember(historyIds) { List(history.size) { TvFocusTarget() } }
+
     Column {
         TvRailTitle("Continue watching")
         LazyRow(
-            modifier = Modifier.focusGroup(),
+            modifier = Modifier
+                .focusProperties {
+                    enter = {
+                        rememberedTvRailRequester(itemFocusTargets, lastFocusedIndex)
+                    }
+                }
+                .focusGroup(),
             contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            itemsIndexed(history, key = { _, item -> item.anilistId }) { _, entry ->
+            itemsIndexed(history, key = { _, item -> item.anilistId }) { index, entry ->
                 TvContinueCard(
                     entry = entry,
                     onClick = { onResume(entry) },
                     onLongClick = { managedEntry = entry },
+                    onFocused = { focused -> if (focused) lastFocusedIndex = index },
+                    modifier = Modifier
+                        .tvFocusTarget(itemFocusTargets[index])
+                        .then(
+                            if (blockDown) {
+                                Modifier.focusProperties { down = FocusRequester.Cancel }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 )
             }
         }
@@ -596,16 +660,21 @@ private fun TvContinueCard(
     entry: HistoryEntry,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onFocused: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-continue-card-scale")
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .width(TvRailCardWidth)
             .zIndex(if (focused) 1f else 0f)
             .scale(scale)
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                onFocused(it.isFocused)
+            }
             .combinedClickable(
                 onClickLabel = "Resume ${entry.title}",
                 onLongClickLabel = "Manage Continue Watching",
@@ -717,3 +786,34 @@ private fun tvFormatLabel(format: String): String = when (format) {
     "MUSIC" -> "Music"
     else -> format.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
 }
+
+internal fun lastTvHomeRailKey(
+    hasHistory: Boolean,
+    hasTrending: Boolean,
+    hasNewest: Boolean,
+    hasPopular: Boolean,
+    hasMovies: Boolean,
+    hasTopRated: Boolean,
+): String? = when {
+    hasTopRated -> "top-rated"
+    hasMovies -> "movies"
+    hasPopular -> "popular"
+    hasNewest -> "newest"
+    hasTrending -> "trending"
+    hasHistory -> "continue-watching"
+    else -> null
+}
+
+/**
+ * A lazy rail can remember an index after that card has been recycled. Returning an unattached
+ * [FocusRequester] from `focusProperties.enter` crashes inside Compose's focus owner, where the
+ * request cannot be caught. Restore the remembered card only while it is still a real target;
+ * otherwise let normal spatial focus choose a currently composed card.
+ */
+internal fun rememberedTvRailRequester(
+    targets: List<TvFocusTarget>,
+    index: Int,
+): FocusRequester = targets.getOrNull(index)
+    ?.takeIf(TvFocusTarget::isAttached)
+    ?.requester
+    ?: FocusRequester.Default

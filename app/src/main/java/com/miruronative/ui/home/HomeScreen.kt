@@ -97,6 +97,7 @@ import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.model.Media
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.UiState
+import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.components.AnimeCard
@@ -122,7 +123,7 @@ fun HomeScreen(
     onSearchClick: () -> Unit,
     onGenreClick: (String?) -> Unit,
     onNotificationsClick: () -> Unit,
-    tvPrimaryFocusRequester: FocusRequester? = null,
+    tvPrimaryFocusTarget: TvFocusTarget? = null,
     modifier: Modifier = Modifier,
     vm: HomeViewModel = viewModel(),
 ) {
@@ -179,7 +180,7 @@ fun HomeScreen(
                     onAnimeClick = onAnimeClick,
                     onWatchNow = onWatchNow,
                     onResume = onResume,
-                    primaryActionFocusRequester = tvPrimaryFocusRequester,
+                    primaryActionFocusTarget = tvPrimaryFocusTarget,
                 )
             }
         }

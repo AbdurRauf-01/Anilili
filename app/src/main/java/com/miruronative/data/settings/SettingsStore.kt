@@ -157,6 +157,9 @@ object SettingsStore {
     private val _hideAdultContent = MutableStateFlow(true)
     val hideAdultContent = _hideAdultContent.asStateFlow()
 
+    private val _blurEpisodeImages = MutableStateFlow(false)
+    val blurEpisodeImages = _blurEpisodeImages.asStateFlow()
+
     /**
      * Brightness, volume and drag-to-seek gestures over the picture. Off means the player only
      * responds to its on-screen controls — the edge drags are easy to trigger by accident when
@@ -241,6 +244,7 @@ object SettingsStore {
     fun setSyncSavedToAniList(value: Boolean) = save(SYNC_SAVED_TO_ANILIST, value, _syncSavedToAniList)
     fun setAutoSkipIntroOutro(value: Boolean) = save(AUTO_SKIP_INTRO_OUTRO, value, _autoSkipIntroOutro)
     fun setHideAdultContent(value: Boolean) = save(HIDE_ADULT_CONTENT, value, _hideAdultContent)
+    fun setBlurEpisodeImages(value: Boolean) = save(BLUR_EPISODE_IMAGES, value, _blurEpisodeImages)
     fun setSubtitlesWithDub(value: Boolean) = save(SUBTITLES_WITH_DUB, value, _subtitlesWithDub)
     fun setUpdateCheckOnLaunch(value: Boolean) = save(UPDATE_CHECK_ON_LAUNCH, value, _updateCheckOnLaunch)
 
@@ -369,6 +373,7 @@ object SettingsStore {
         _syncSavedToAniList.value = prefs[SYNC_SAVED_TO_ANILIST] ?: true
         _autoSkipIntroOutro.value = prefs[AUTO_SKIP_INTRO_OUTRO] ?: false
         _hideAdultContent.value = prefs[HIDE_ADULT_CONTENT] ?: true
+        _blurEpisodeImages.value = prefs[BLUR_EPISODE_IMAGES] ?: false
         _subtitlesWithDub.value = prefs[SUBTITLES_WITH_DUB] ?: false
         _updateCheckOnLaunch.value = prefs[UPDATE_CHECK_ON_LAUNCH] ?: true
         _captionStyle.value = readCaptionStyle(prefs)
@@ -412,6 +417,7 @@ object SettingsStore {
     private val SYNC_SAVED_TO_ANILIST = booleanPreferencesKey("sync_saved_to_anilist")
     private val AUTO_SKIP_INTRO_OUTRO = booleanPreferencesKey("auto_skip_intro_outro")
     private val HIDE_ADULT_CONTENT = booleanPreferencesKey("hide_adult_content")
+    private val BLUR_EPISODE_IMAGES = booleanPreferencesKey("blur_episode_images")
     private val SUBTITLES_WITH_DUB = booleanPreferencesKey("subtitles_with_dub")
     private val UPDATE_CHECK_ON_LAUNCH = booleanPreferencesKey("update_check_on_launch")
     private val CAPTION_BACKGROUND_OPACITY = intPreferencesKey("caption_background_opacity")

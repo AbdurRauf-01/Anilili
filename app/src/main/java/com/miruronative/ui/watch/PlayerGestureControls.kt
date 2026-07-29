@@ -74,7 +74,7 @@ private sealed interface GestureLevel {
     data class Volume(override val fraction: Float) : GestureLevel
 }
 
-private enum class GestureZone { Brightness, Volume }
+internal enum class GestureZone { Brightness, Volume }
 
 private enum class GestureDragAxis { Horizontal, Vertical }
 
@@ -84,21 +84,14 @@ private data class SeekGesture(
     val durationMs: Long,
 )
 
-// Vertical drags are only picked up inside these edge strips, so a swipe across the middle of the
-// picture leaves brightness and volume alone. Sizing them by share of the width keeps them within
-// thumb reach on a phone held in portrait; the clamp stops them swallowing a landscape screen.
-private const val GESTURE_EDGE_FRACTION = 0.28f
-private val GESTURE_EDGE_MIN = 64.dp
-private val GESTURE_EDGE_MAX = 160.dp
 private const val SEEK_MS_PER_SCREEN = 120_000L
 
 /**
- * Touch-gesture overlay shared by the native and embed players. A vertical drag down the left edge
- * of the screen scrubs brightness (the Activity window's `screenBrightness`); down the right edge it
- * scrubs volume (the media audio stream, which both ExoPlayer and the WebView route through). The
- * middle of the picture is deliberately inert to either, so neither is caught by accident. A
- * transient slider indicator shows the level while dragging. A horizontal drag anywhere on the
- * picture previews a relative seek and commits it when the finger is released.
+ * Touch-gesture overlay shared by the native and embed players. A vertical drag anywhere in the
+ * left half of the screen scrubs brightness (the Activity window's `screenBrightness`); anywhere in
+ * the right half it scrubs volume (the media audio stream, which both ExoPlayer and the WebView
+ * route through). A transient slider indicator shows the level while dragging. A horizontal drag
+ * anywhere on the picture previews a relative seek and commits it when the finger is released.
  *
  * Taps and double-taps are handled here too so a single pointer handler owns the surface: the drag
  * detector and the tap detectors can't be separate `pointerInput`s without one consuming the down
@@ -154,14 +147,11 @@ internal fun PlayerGestureControls(
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         down.consume()
-                        val edge = (size.width * GESTURE_EDGE_FRACTION)
-                            .coerceIn(GESTURE_EDGE_MIN.toPx(), GESTURE_EDGE_MAX.toPx())
-                        val zone = when {
-                            !dragGestures -> null
-                            down.position.x <= edge -> GestureZone.Brightness
-                            down.position.x >= size.width - edge -> GestureZone.Volume
-                            else -> null
-                        }
+                        val zone = playerGestureZone(
+                            xPx = down.position.x,
+                            widthPx = size.width.toFloat(),
+                            dragGestures = dragGestures,
+                        )
                         var value = when (zone) {
                             GestureZone.Brightness -> readBrightness(activity)
                             GestureZone.Volume -> readVolume(audioManager)
@@ -318,6 +308,22 @@ internal fun PlayerGestureControls(
             }
         }
     }
+}
+
+/**
+ * Which vertical drag a touch at [xPx] controls: the left half of the picture is brightness and the
+ * right half is volume, split down the middle MX Player style.
+ *
+ * Narrow edge strips were easy to miss mid-episode, and widening them to full halves costs nothing:
+ * the caller's axis check hands every horizontal drag to seek first, so the only gesture a zone
+ * ever claims is a deliberate vertical one. Returns null when drag gestures are switched off, and
+ * for a zero-width surface, where there is no meaningful side to pick.
+ */
+internal fun playerGestureZone(xPx: Float, widthPx: Float, dragGestures: Boolean): GestureZone? = when {
+    !dragGestures -> null
+    widthPx <= 0f || !widthPx.isFinite() || !xPx.isFinite() -> null
+    xPx < widthPx / 2f -> GestureZone.Brightness
+    else -> GestureZone.Volume
 }
 
 /** A full-width swipe moves two minutes; shorter movement scales linearly and clamps to the video. */

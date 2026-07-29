@@ -26,8 +26,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -60,7 +58,7 @@ fun TvNativeTextField(
     imeAction: Int = EditorInfo.IME_ACTION_DONE,
     onImeAction: () -> Unit = {},
     onMoveDown: (() -> Unit)? = null,
-    tvFocusRequester: FocusRequester? = null,
+    tvFocusTarget: TvFocusTarget? = null,
 ) {
     val currentOnValueChange by rememberUpdatedState(onValueChange)
     val currentOnImeAction by rememberUpdatedState(onImeAction)
@@ -91,7 +89,7 @@ fun TvNativeTextField(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 56.dp)
-                .then(tvFocusRequester?.let { Modifier.focusRequester(it) } ?: Modifier),
+                .tvFocusTarget(tvFocusTarget),
             factory = { context ->
                 EditText(context).apply {
                     tag = NativeTvTextWatcher(this, currentOnValueChange).also(::addTextChangedListener)

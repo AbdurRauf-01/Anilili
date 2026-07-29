@@ -92,6 +92,7 @@ import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.SkipTimes
+import com.miruronative.data.model.hasUsableWindow
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
 import com.miruronative.data.settings.CaptionEdgeStyle
@@ -202,6 +203,11 @@ fun PlayerSurface(
     qualityStreams: List<StreamItem> = listOf(stream),
     subtitles: List<SubtitleItem>,
     skip: SkipTimes?,
+    skipTimingStatus: SkipTimingStatus = if (skip?.hasUsableWindow() == true) {
+        SkipTimingStatus.PROVIDER
+    } else {
+        SkipTimingStatus.UNAVAILABLE
+    },
     seriesTitle: String,
     episodeTitle: String,
     artworkUrl: String?,
@@ -717,6 +723,48 @@ fun PlayerSurface(
     val outroEndMs = skip?.outroEnd?.times(1000)?.toLong()
     var introAutoSkipped by remember(activeStream.url, introStartMs, introEndMs) { mutableStateOf(false) }
     var outroAutoHandled by remember(activeStream.url, outroStartMs, outroEndMs) { mutableStateOf(false) }
+    var pendingSkipTargetMs by remember(activeStream.url) { mutableStateOf<Long?>(null) }
+    val requestSkipSeek: (Long, String) -> Unit = { targetMs, trigger ->
+        val activeController = controller
+        if (activeController == null) {
+            DiagnosticsLog.event(
+                "PlayerSurface skip seek rejected trigger=$trigger targetMs=$targetMs controller=none",
+            )
+        } else {
+            pendingSkipTargetMs = targetMs
+            DiagnosticsLog.event(
+                "PlayerSurface skip seek requested trigger=$trigger positionMs=$positionMs targetMs=$targetMs",
+            )
+            activeController.seekTo(targetMs)
+        }
+    }
+
+    LaunchedEffect(activeStream.url, skipTimingStatus, introStartMs, introEndMs, outroStartMs, outroEndMs) {
+        DiagnosticsLog.event(
+            "PlayerSurface skip metadata status=${skipTimingStatus.name.lowercase()} " +
+                "introMs=$introStartMs-${introEndMs ?: "none"} " +
+                "outroMs=${outroStartMs ?: "none"}-${outroEndMs ?: "none"}",
+        )
+    }
+    LaunchedEffect(positionMs, pendingSkipTargetMs) {
+        val targetMs = pendingSkipTargetMs ?: return@LaunchedEffect
+        if (positionMs in (targetMs - 2_500L).coerceAtLeast(0L)..(targetMs + 5_000L)) {
+            DiagnosticsLog.event(
+                "PlayerSurface skip seek confirmed positionMs=$positionMs targetMs=$targetMs",
+            )
+            pendingSkipTargetMs = null
+        }
+    }
+    LaunchedEffect(pendingSkipTargetMs) {
+        val targetMs = pendingSkipTargetMs ?: return@LaunchedEffect
+        delay(5_000)
+        if (pendingSkipTargetMs == targetMs) {
+            DiagnosticsLog.event(
+                "PlayerSurface skip seek unconfirmed positionMs=$positionMs targetMs=$targetMs",
+            )
+            pendingSkipTargetMs = null
+        }
+    }
 
     LaunchedEffect(playbackGestureIsPlaying) {
         if (playbackGestureIsPlaying != null) {
@@ -740,7 +788,7 @@ fun PlayerSurface(
 
         if (!introAutoSkipped && isInSkipWindow(positionMs, introStartMs, introEndMs)) {
             introAutoSkipped = true
-            activeController.seekTo(introEndMs ?: return@LaunchedEffect)
+            requestSkipSeek(introEndMs ?: return@LaunchedEffect, "auto-intro")
             return@LaunchedEffect
         }
 
@@ -1066,6 +1114,7 @@ fun PlayerSurface(
                 onSubtitleDelayChange = { SubtitleDelay.set(it) },
                 autoSkip = autoSkipIntroOutro,
                 onAutoSkipChange = SettingsStore::setAutoSkipIntroOutro,
+                skipTimingStatus = skipTimingStatus,
             )
         }
 
@@ -1087,6 +1136,8 @@ fun PlayerSurface(
 
         if (device.isTv && focusPlayerOnStart && tvControlsVisible && controller != null) {
             TvPlayerControls(
+                seriesTitle = seriesTitle,
+                episodeTitle = episodeTitle,
                 positionMs = positionMs,
                 durationMs = durationMs,
                 isPlaying = playbackIsPlaying,
@@ -1130,7 +1181,7 @@ fun PlayerSurface(
                     }
                 } else null,
                 onFullscreen = onToggleFullscreen,
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier.fillMaxSize(),
             )
         }
 
@@ -1152,12 +1203,16 @@ fun PlayerSurface(
 
         val action: Pair<String, () -> Unit>? = when {
             introEndMs != null && positionMs in introStartMs..introEndMs ->
-                "Skip Intro" to { controller?.seekTo(introEndMs); Unit }
+                "Skip Intro" to { requestSkipSeek(introEndMs, "manual-intro") }
             outroStartMs != null && outroEndMs != null && positionMs in outroStartMs..outroEndMs ->
                 "Next Episode" to onNextEpisode
             else -> null
         }
         LaunchedEffect(action?.first, playerView, device.isTv, focusPlayerOnStart) {
+            DiagnosticsLog.event(
+                "PlayerSurface skip action=${action?.first ?: "none"} positionMs=$positionMs " +
+                    "status=${skipTimingStatus.name.lowercase()}",
+            )
             if (device.isTv && focusPlayerOnStart) {
                 // Compose may focus a newly inserted skip/next action before PlayerView can
                 // reclaim focus. Return remote input to the player once this frame settles.

@@ -105,6 +105,7 @@ internal fun PlayerSettingsSheet(
     onCaptionAppearance: (() -> Unit)? = null,
     autoSkip: Boolean? = null,
     onAutoSkipChange: (Boolean) -> Unit = {},
+    skipTimingStatus: SkipTimingStatus? = null,
     subtitleDelayMs: Long? = null,
     onSubtitleDelayChange: (Long) -> Unit = {},
     onEnterPip: (() -> Unit)? = null,
@@ -123,6 +124,7 @@ internal fun PlayerSettingsSheet(
             onCaptionAppearance = onCaptionAppearance,
             autoSkip = autoSkip,
             onAutoSkipChange = onAutoSkipChange,
+            skipTimingStatus = skipTimingStatus,
             subtitleDelayMs = subtitleDelayMs,
             onSubtitleDelayChange = onSubtitleDelayChange,
             onEnterPip = onEnterPip,
@@ -175,6 +177,7 @@ private fun SheetSections(
     onCaptionAppearance: (() -> Unit)?,
     autoSkip: Boolean?,
     onAutoSkipChange: (Boolean) -> Unit,
+    skipTimingStatus: SkipTimingStatus?,
     subtitleDelayMs: Long?,
     onSubtitleDelayChange: (Long) -> Unit,
     onEnterPip: (() -> Unit)?,
@@ -231,7 +234,17 @@ private fun SheetSections(
 
     SectionLabel("Playback")
     ToggleRow("Auto-play next episode", autoplay, onAutoplayChange)
-    autoSkip?.let { ToggleRow("Auto-skip intro/outro", it, onAutoSkipChange) }
+    autoSkip?.let {
+        ToggleRow("Auto-skip intro/outro", it, onAutoSkipChange)
+        skipTimingStatus?.let { status ->
+            Text(
+                status.playerMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.62f),
+                modifier = Modifier.padding(start = 16.dp, end = 12.dp, bottom = 6.dp),
+            )
+        }
+    }
     onEnterPip?.let { ClickableRow("Picture-in-Picture", it) }
 }
 

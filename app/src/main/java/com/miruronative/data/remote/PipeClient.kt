@@ -7,6 +7,7 @@ import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.EpisodesResult
 import com.miruronative.data.model.ProviderData
 import com.miruronative.data.model.SkipTimes
+import com.miruronative.data.model.hasUsableWindow
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
@@ -178,7 +179,7 @@ class PipeClient(
                 introEnd = intro?.num("end"),
                 outroStart = outro?.num("start"),
                 outroEnd = outro?.num("end"),
-            )
+            ).takeIf(SkipTimes::hasUsableWindow)
         }
 
         val download = root.str("download")

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.miruronative.ui.detail
 
 import androidx.compose.animation.core.animateFloatAsState
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,7 +45,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -52,6 +59,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -65,10 +73,18 @@ import coil.compose.AsyncImage
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.Media
+import com.miruronative.data.settings.SettingsStore
 import kotlinx.coroutines.launch
 import com.miruronative.data.model.StudioNode
 import com.miruronative.ui.adaptive.focusHighlight
+import com.miruronative.ui.adaptive.TvFocusTarget
+import com.miruronative.ui.adaptive.tvFocusTarget
+import com.miruronative.ui.components.EpisodeArtwork
+import com.miruronative.ui.components.TvHeroArtwork
 import com.miruronative.ui.components.WatchProgressBar
+import com.miruronative.ui.components.blockIndexContaining
+import com.miruronative.ui.components.episodeBlocks
+import com.miruronative.ui.components.episodeArtworkImage
 import com.miruronative.ui.components.episodeWatchFraction
 import java.time.Instant
 import java.time.ZoneId
@@ -97,6 +113,19 @@ internal fun TvDetailContent(
 ) {
     val info = data.info
     val episodes = data.episodes
+    val seasonResume = history.firstOrNull { it.anilistId == data.selectedSeasonId }
+    val episodeKeys = episodes.map(EpisodeItem::pipeId)
+    val blocks = remember(data.selectedSeasonId, episodeKeys) { episodeBlocks(episodes) }
+    var selectedBlockIndex by remember(data.selectedSeasonId, episodeKeys) {
+        mutableIntStateOf(blockIndexContaining(blocks, seasonResume?.episodeNumber))
+    }
+    val blockIndex = selectedBlockIndex.coerceIn(0, (blocks.size - 1).coerceAtLeast(0))
+    val shownEpisodes = blocks.getOrNull(blockIndex)?.episodes.orEmpty()
+    val fallbackImage = data.seasons.firstOrNull { it.id == data.selectedSeasonId }
+        ?.let { it.bannerImage ?: it.coverImage.best }
+        ?: info.bannerImage
+        ?: info.coverImage.best
+    val episodeFocusTarget = remember(data.selectedSeasonId, blockIndex) { TvFocusTarget() }
     val playCurrent: () -> Unit = {
         when {
             resume != null -> onPlay(info.id, resume.provider, resume.category, resume.episodeLabel)
@@ -108,86 +137,565 @@ internal fun TvDetailContent(
             )
         }
     }
-    val edgeBringIntoViewSpec = remember {
-        object : BringIntoViewSpec {
-            override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
-                val trailingEdge = offset + size
-                return when {
-                    offset >= 0f && trailingEdge <= containerSize -> 0f
-                    offset < 0f && trailingEdge > containerSize -> 0f
-                    abs(offset) < abs(trailingEdge - containerSize) -> offset
-                    else -> trailingEdge - containerSize
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        TvHeroArtwork(
+            media = info,
+            posterEndPadding = 42,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(
+                    0f to Color.Black.copy(alpha = 0.94f),
+                    .46f to Color.Black.copy(alpha = 0.76f),
+                    1f to Color.Black.copy(alpha = 0.52f),
+                ),
+            ),
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    0f to Color.Black.copy(alpha = 0.26f),
+                    .72f to Color.Black.copy(alpha = 0.28f),
+                    1f to Color.Black.copy(alpha = 0.92f),
+                ),
+            ),
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 78.dp),
+        ) {
+            TvDetailInfoPane(
+                info = info,
+                resume = resume,
+                saved = saved,
+                listStatusLabel = listStatusLabel,
+                canWatch = episodes.isNotEmpty() || resume != null,
+                related = data.series.filter { it.id != info.id },
+                onWatch = playCurrent,
+                onToggleSaved = onToggleSaved,
+                onAnimeClick = onAnimeClick,
+                onStudioClick = onStudioClick,
+                primaryActionFocusRequester = primaryActionFocusRequester,
+                episodeFocusTarget = episodeFocusTarget.takeIf { shownEpisodes.isNotEmpty() },
+                onPrimaryFocusAcquired = onPrimaryFocusAcquired,
+                modifier = Modifier.weight(0.47f).fillMaxHeight(),
+            )
+            TvEpisodeBrowserPane(
+                episodes = shownEpisodes,
+                allEpisodeCount = episodes.size,
+                seasons = data.seasons,
+                selectedSeasonId = data.selectedSeasonId,
+                blocks = blocks.map { it.label },
+                selectedBlockIndex = blockIndex,
+                fallbackImage = fallbackImage,
+                resume = seasonResume,
+                loading = data.seasonEpisodesLoading,
+                episodeFocusTarget = episodeFocusTarget,
+                leftFocusRequester = primaryActionFocusRequester,
+                onSelectSeason = onSelectSeason,
+                onSelectBlock = { selectedBlockIndex = it },
+                onPlay = { episode ->
+                    onPlay(
+                        data.selectedSeasonId,
+                        "auto",
+                        data.preferredCategory.api,
+                        episode.displayNumber,
+                    )
+                },
+                modifier = Modifier
+                    .weight(0.53f)
+                    .fillMaxHeight()
+                    .padding(end = 32.dp, bottom = 26.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TvDetailInfoPane(
+    info: Media,
+    resume: HistoryEntry?,
+    saved: Boolean,
+    listStatusLabel: String?,
+    canWatch: Boolean,
+    related: List<Media>,
+    onWatch: () -> Unit,
+    onToggleSaved: () -> Unit,
+    onAnimeClick: (Int) -> Unit,
+    onStudioClick: (StudioNode) -> Unit,
+    primaryActionFocusRequester: FocusRequester,
+    episodeFocusTarget: TvFocusTarget?,
+    onPrimaryFocusAcquired: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val description = remember(info.description) {
+        info.description
+            ?.replace(Regex("<[^>]*>"), "")
+            ?.replace("&amp;", "&")
+            ?.replace("&quot;", "\"")
+            ?.trim()
+            .orEmpty()
+    }
+    val studio = info.studios.nodes.firstOrNull { it.isAnimationStudio && !it.name.isNullOrBlank() }
+
+    Column(
+        modifier = modifier.padding(start = TvDetailPadding, end = 26.dp, top = 28.dp),
+    ) {
+        Text(
+            text = info.title.preferred,
+            color = Color.White,
+            fontSize = 36.sp,
+            lineHeight = 39.sp,
+            fontWeight = FontWeight.Black,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        TvDetailMetadata(info, maxGenres = 1)
+        if (description.isNotBlank()) {
+            Text(
+                text = description,
+                color = Color.White.copy(alpha = 0.75f),
+                style = MaterialTheme.typography.bodyMedium,
+                lineHeight = 20.sp,
+                maxLines = 5,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+        }
+        Row(
+            modifier = Modifier.padding(top = 13.dp),
+            horizontalArrangement = Arrangement.spacedBy(11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(
+                onClick = onWatch,
+                enabled = canWatch,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White,
+                    contentColor = Color.Black,
+                ),
+                contentPadding = PaddingValues(horizontal = 19.dp, vertical = 9.dp),
+                modifier = Modifier
+                    .focusRequester(primaryActionFocusRequester)
+                    .then(
+                        episodeFocusTarget?.takeIf(TvFocusTarget::isAttached)?.let { target ->
+                            Modifier.focusProperties { right = target.requester }
+                        } ?: Modifier,
+                    )
+                    .onFocusChanged {
+                        if (it.isFocused || it.hasFocus) onPrimaryFocusAcquired()
+                    }
+                    .focusHighlight(RoundedCornerShape(12.dp), focusedScale = 1.04f),
+            ) {
+                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(21.dp))
+                Text(
+                    resume?.let { "Continue E${it.episodeLabel}" } ?: "Watch",
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 7.dp),
+                )
+            }
+            OutlinedButton(
+                onClick = onToggleSaved,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = Color.Black.copy(alpha = 0.52f),
+                    contentColor = Color.White,
+                ),
+                contentPadding = PaddingValues(horizontal = 17.dp, vertical = 9.dp),
+                modifier = Modifier.focusHighlight(RoundedCornerShape(12.dp), focusedScale = 1.04f),
+            ) {
+                Icon(
+                    if (saved || listStatusLabel != null) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    listStatusLabel ?: if (saved) "In library" else "Add to list",
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 7.dp),
+                )
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 30.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            studio?.let { selectedStudio ->
+                item(key = "studio") {
+                    Text(
+                        text = selectedStudio.name.orEmpty(),
+                        color = Color.White.copy(alpha = 0.72f),
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        modifier = Modifier
+                            .focusHighlight(RoundedCornerShape(9.dp), focusedScale = 1.03f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(Color.Black.copy(alpha = 0.42f))
+                            .clickable(enabled = selectedStudio.id > 0) { onStudioClick(selectedStudio) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+            item(key = "about") {
+                Text(
+                    text = "About",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                val facts = buildList {
+                    info.status?.let { add(tvDetailPretty(it)) }
+                    info.episodes?.let { add("$it episodes") }
+                    info.season?.let { add(tvDetailPretty(it)) }
+                }.joinToString("  •  ")
+                if (facts.isNotBlank()) {
+                    Text(
+                        text = facts,
+                        color = Color.White.copy(alpha = 0.66f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 5.dp),
+                    )
+                }
+                info.nextAiringEpisode?.airingAt?.let { airingAt ->
+                    val date = Instant.ofEpochSecond(airingAt)
+                        .atZone(ZoneId.systemDefault())
+                        .format(DateTimeFormatter.ofPattern("EEE, MMM d 'at' h:mm a"))
+                    Row(
+                        modifier = Modifier.padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.Schedule,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Text(
+                            "Episode ${info.nextAiringEpisode.episode ?: "?"}  •  $date",
+                            color = Color.White.copy(alpha = 0.66f),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 7.dp),
+                        )
+                    }
+                }
+            }
+            if (related.isNotEmpty()) {
+                item(key = "related") {
+                    TvRelatedCompactRail(
+                        related = related,
+                        episodeFocusTarget = episodeFocusTarget,
+                        onAnimeClick = onAnimeClick,
+                    )
                 }
             }
         }
     }
+}
 
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-
-    CompositionLocalProvider(LocalBringIntoViewSpec provides edgeBringIntoViewSpec) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize().background(Color.Black),
-            contentPadding = PaddingValues(bottom = 42.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+@Composable
+private fun TvRelatedCompactRail(
+    related: List<Media>,
+    episodeFocusTarget: TvFocusTarget?,
+    onAnimeClick: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text(
+            text = "Related",
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        LazyRow(
+            modifier = Modifier.focusGroup(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(vertical = 5.dp),
         ) {
-            item(key = "detail-hero") {
-                TvDetailHero(
-                    info = info,
-                    resume = resume,
-                    saved = saved,
-                    listStatusLabel = listStatusLabel,
-                    canWatch = episodes.isNotEmpty() || resume != null,
-                    onWatch = playCurrent,
-                    onToggleSaved = onToggleSaved,
-                    onStudioClick = onStudioClick,
-                    primaryActionFocusRequester = primaryActionFocusRequester,
-                    onPrimaryFocusAcquired = {
-                        onPrimaryFocusAcquired()
-                        scope.launch { listState.animateScrollToItem(0) }
-                    },
-                )
-            }
-
-            if (data.seasons.size > 1) {
-                item(key = "seasons") {
-                    TvSeasonRail(
-                        seasons = data.seasons,
-                        selectedSeasonId = data.selectedSeasonId,
-                        onSelect = onSelectSeason,
+            items(related, key = { it.id }) { media ->
+                Column(
+                    modifier = Modifier
+                        .width(142.dp)
+                        .then(
+                            episodeFocusTarget?.takeIf(TvFocusTarget::isAttached)?.let { target ->
+                                Modifier.focusProperties { right = target.requester }
+                            } ?: Modifier,
+                        )
+                        .focusHighlight(RoundedCornerShape(9.dp), focusedScale = 1.04f)
+                        .clickable { onAnimeClick(media.id) },
+                ) {
+                    AsyncImage(
+                        model = media.bannerImage ?: media.coverImage.best,
+                        contentDescription = media.title.preferred,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentScale = ContentScale.Crop,
+                    )
+                    Text(
+                        text = media.title.preferred,
+                        color = Color.White.copy(alpha = 0.82f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 5.dp),
                     )
                 }
             }
+        }
+    }
+}
 
-            item(key = "episodes") {
-                TvEpisodeRail(
-                    episodes = episodes,
-                    fallbackImage = data.seasons.firstOrNull { it.id == data.selectedSeasonId }
-                        ?.let { it.bannerImage ?: it.coverImage.best }
-                        ?: info.bannerImage
-                        ?: info.coverImage.best,
-                    resume = history.firstOrNull { it.anilistId == data.selectedSeasonId },
-                    loading = data.seasonEpisodesLoading,
-                    onPlay = { episode ->
-                        onPlay(
-                            data.selectedSeasonId,
-                            "auto",
-                            data.preferredCategory.api,
-                            episode.displayNumber,
-                        )
-                    },
-                )
-            }
+@Composable
+private fun TvEpisodeBrowserPane(
+    episodes: List<EpisodeItem>,
+    allEpisodeCount: Int,
+    seasons: List<Media>,
+    selectedSeasonId: Int,
+    blocks: List<String>,
+    selectedBlockIndex: Int,
+    fallbackImage: String?,
+    resume: HistoryEntry?,
+    loading: Boolean,
+    episodeFocusTarget: TvFocusTarget,
+    leftFocusRequester: FocusRequester,
+    onSelectSeason: (Int) -> Unit,
+    onSelectBlock: (Int) -> Unit,
+    onPlay: (EpisodeItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
+    val listState = rememberLazyListState()
+    val resumeIndex = episodes.indexOfFirst { it.number == resume?.episodeNumber }.coerceAtLeast(0)
+    val initialScrollIndex = if (episodes.size <= 6) 0 else resumeIndex
 
-            item(key = "overview") { TvOverview(info) }
+    LaunchedEffect(selectedSeasonId, selectedBlockIndex, episodes.map(EpisodeItem::pipeId)) {
+        if (episodes.isNotEmpty()) listState.scrollToItem(initialScrollIndex)
+    }
 
-            val related = data.series.filter { it.id != info.id }
-            if (related.isNotEmpty()) {
-                item(key = "related") {
-                    TvRelatedRail(related = related, onAnimeClick = onAnimeClick)
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.Black.copy(alpha = 0.78f))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(18.dp))
+            .padding(top = 18.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Text(
+                text = "Episodes",
+                color = Color.White,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Black,
+            )
+            Text(
+                text = "$allEpisodeCount total",
+                color = Color.White.copy(alpha = 0.52f),
+                fontSize = 12.sp,
+            )
+        }
+
+        if (seasons.size > 1) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp).focusGroup(),
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                itemsIndexed(seasons, key = { _, season -> season.id }) { index, season ->
+                    TvDetailFilterChip(
+                        label = "Season ${index + 1}",
+                        selected = season.id == selectedSeasonId,
+                        onClick = { onSelectSeason(season.id) },
+                    )
                 }
             }
+        }
+
+        if (blocks.size > 1) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(top = 9.dp).focusGroup(),
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                itemsIndexed(blocks) { index, label ->
+                    TvDetailFilterChip(
+                        label = label,
+                        selected = index == selectedBlockIndex,
+                        onClick = { onSelectBlock(index) },
+                    )
+                }
+            }
+        }
+
+        when {
+            episodes.isNotEmpty() -> LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(top = 12.dp)
+                    .focusGroup(),
+                contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                itemsIndexed(episodes, key = { _, episode -> episode.pipeId }) { index, episode ->
+                    TvEpisodeListRow(
+                        episode = episode,
+                        image = episodeArtworkImage(episode.image, fallbackImage),
+                        blurred = blurEpisodeImages,
+                        onBlurredChange = SettingsStore::setBlurEpisodeImages,
+                        watchedFraction = episodeWatchFraction(resume, episode.number),
+                        isResumeEpisode = episode.number == resume?.episodeNumber,
+                        focusTarget = episodeFocusTarget.takeIf { index == resumeIndex },
+                        leftFocusRequester = leftFocusRequester,
+                        blockDown = index == episodes.lastIndex,
+                        onClick = { onPlay(episode) },
+                    )
+                }
+            }
+            loading -> Text(
+                text = "Loading episodes…",
+                color = Color.White.copy(alpha = 0.58f),
+                modifier = Modifier.padding(20.dp),
+            )
+            else -> Text(
+                text = "Episode information is not available yet.",
+                color = Color.White.copy(alpha = 0.58f),
+                modifier = Modifier.padding(20.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TvDetailFilterChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = label,
+        color = if (selected) Color.White else Color.White.copy(alpha = 0.64f),
+        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+        fontSize = 12.sp,
+        modifier = Modifier
+            .focusHighlight(RoundedCornerShape(9.dp), focusedScale = 1.05f)
+            .clip(RoundedCornerShape(9.dp))
+            .background(
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.30f)
+                else Color.White.copy(alpha = 0.07f),
+            )
+            .border(
+                1.dp,
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)
+                else Color.White.copy(alpha = 0.08f),
+                RoundedCornerShape(9.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 7.dp),
+    )
+}
+
+@Composable
+private fun TvEpisodeListRow(
+    episode: EpisodeItem,
+    image: String?,
+    blurred: Boolean,
+    onBlurredChange: (Boolean) -> Unit,
+    watchedFraction: Float,
+    isResumeEpisode: Boolean,
+    focusTarget: TvFocusTarget?,
+    leftFocusRequester: FocusRequester,
+    blockDown: Boolean,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (focused) 1.018f else 1f, label = "tv-episode-row-scale")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .zIndex(if (focused) 1f else 0f)
+            .scale(scale)
+            .tvFocusTarget(focusTarget)
+            .focusProperties {
+                left = leftFocusRequester
+                if (blockDown) down = FocusRequester.Cancel
+            }
+            .onFocusChanged { focused = it.isFocused }
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (focused) Color.White.copy(alpha = 0.13f) else Color.White.copy(alpha = 0.055f))
+            .border(
+                if (focused) 2.dp else 1.dp,
+                if (focused) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.07f),
+                RoundedCornerShape(12.dp),
+            )
+            .clickable(onClickLabel = "Play episode ${episode.displayNumber}", onClick = onClick)
+            .padding(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        EpisodeArtwork(
+            image = image,
+            blurred = blurred,
+            onBlurredChange = onBlurredChange,
+            compact = true,
+            modifier = Modifier
+                .width(142.dp)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentScale = ContentScale.Crop,
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "EPISODE ${episode.displayNumber}",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Black,
+                )
+                if (isResumeEpisode) {
+                    Text(
+                        text = "CONTINUE",
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Black,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.32f))
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                    )
+                }
+            }
+            Text(
+                text = episode.distinctTitle ?: "Episode ${episode.displayNumber}",
+                color = Color.White,
+                fontSize = 14.sp,
+                lineHeight = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            WatchProgressBar(
+                fraction = watchedFraction,
+                modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+            )
         }
     }
 }
@@ -345,13 +853,16 @@ private fun TvDetailHero(
 }
 
 @Composable
-private fun TvDetailMetadata(info: Media) {
+private fun TvDetailMetadata(
+    info: Media,
+    maxGenres: Int = 3,
+) {
     val cells = buildList {
         info.averageScore?.takeIf { it > 0 }?.let { add("score" to "$it%") }
         info.format?.let { add("text" to tvDetailPretty(it)) }
         (info.seasonYear ?: info.startDate?.year)?.let { add("text" to it.toString()) }
         info.duration?.takeIf { it > 0 }?.let { add("text" to "${it}m") }
-        info.genres.take(3).forEach { add("text" to it) }
+        info.genres.take(maxGenres).forEach { add("text" to it) }
     }
     Row(
         modifier = Modifier.padding(top = 8.dp),
@@ -438,6 +949,7 @@ private fun TvEpisodeRail(
     loading: Boolean,
     onPlay: (EpisodeItem) -> Unit,
 ) {
+    val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
     Column {
         TvDetailSectionTitle("Episodes")
         when {
@@ -449,7 +961,9 @@ private fun TvEpisodeRail(
                 items(episodes, key = { it.pipeId }) { episode ->
                     TvEpisodeCard(
                         episode = episode,
-                        image = episode.image ?: fallbackImage,
+                        image = episodeArtworkImage(episode.image, fallbackImage),
+                        blurred = blurEpisodeImages,
+                        onBlurredChange = SettingsStore::setBlurEpisodeImages,
                         watchedFraction = episodeWatchFraction(resume, episode.number),
                         onClick = { onPlay(episode) },
                     )
@@ -473,6 +987,8 @@ private fun TvEpisodeRail(
 private fun TvEpisodeCard(
     episode: EpisodeItem,
     image: String?,
+    blurred: Boolean,
+    onBlurredChange: (Boolean) -> Unit,
     watchedFraction: Float,
     onClick: () -> Unit,
 ) {
@@ -499,9 +1015,10 @@ private fun TvEpisodeCard(
                     TvDetailCardShape,
                 ),
         ) {
-            AsyncImage(
-                model = image,
-                contentDescription = null,
+            EpisodeArtwork(
+                image = image,
+                blurred = blurred,
+                onBlurredChange = onBlurredChange,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
             )
@@ -515,7 +1032,7 @@ private fun TvEpisodeCard(
                 ),
             )
             Text(
-                "S1 • E${episode.displayNumber}",
+                "EPISODE ${episode.displayNumber}",
                 color = Color.White,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,

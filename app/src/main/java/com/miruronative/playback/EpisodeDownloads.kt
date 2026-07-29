@@ -105,6 +105,13 @@ data class EpisodeDownload(
     val updatedAtMs: Long,
 ) {
     val isComplete: Boolean get() = state == EpisodeDownloadState.COMPLETED
+    val isPaused: Boolean get() = state == EpisodeDownloadState.STOPPED
+    val canPause: Boolean get() = state in setOf(
+        EpisodeDownloadState.QUEUED,
+        EpisodeDownloadState.DOWNLOADING,
+        EpisodeDownloadState.RESTARTING,
+    )
+    val canResume: Boolean get() = isPaused
 
     /** Adaptive downloads are a manifest plus segments; direct ones are already a single file. */
     val isAdaptive: Boolean get() = metadata.streamType?.equals("hls", true)
@@ -384,6 +391,32 @@ object EpisodeDownloads {
             false,
         )
         DiagnosticsLog.event("Episode download remove requested id=$id")
+    }
+
+    /** Stops one persistent Media3 download without discarding its cached bytes. */
+    fun pause(context: Context, id: String) {
+        initialize(context)
+        DownloadService.sendSetStopReason(
+            appContext,
+            EpisodeDownloadService::class.java,
+            id,
+            USER_PAUSED_STOP_REASON,
+            false,
+        )
+        DiagnosticsLog.event("Episode download paused id=$id")
+    }
+
+    /** Clears the user stop reason so Media3 continues the same request from its cached bytes. */
+    fun resume(context: Context, id: String) {
+        initialize(context)
+        DownloadService.sendSetStopReason(
+            appContext,
+            EpisodeDownloadService::class.java,
+            id,
+            Download.STOP_REASON_NONE,
+            false,
+        )
+        DiagnosticsLog.event("Episode download resumed id=$id")
     }
 
     fun localSubtitles(
@@ -823,6 +856,7 @@ object EpisodeDownloads {
     private const val SUBTITLE_DIRECTORY = "episode-download-subtitles"
     private const val PUBLIC_DOWNLOAD_SUBDIRECTORY = "Anilili"
     private const val PROGRESS_REFRESH_MS = 1_000L
+    private const val USER_PAUSED_STOP_REASON = 1
     private val SUPPORTED_SUBTITLE_EXTENSIONS = setOf("vtt", "srt", "ass", "ssa", "ttml", "xml")
     private const val FALLBACK_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +

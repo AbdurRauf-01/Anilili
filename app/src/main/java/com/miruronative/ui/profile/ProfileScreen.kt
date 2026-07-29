@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
@@ -409,6 +410,12 @@ fun ProfileScreen(
                                         episode = episode,
                                         exportStatus = exportStatuses[episode.id],
                                         onPlay = { onPlayDownload(episode.id) },
+                                        onPauseToggle = {
+                                            episode.download?.let { download ->
+                                                if (download.isPaused) EpisodeDownloads.resume(context, episode.id)
+                                                else EpisodeDownloads.pause(context, episode.id)
+                                            }
+                                        },
                                         onRemove = { removeOfflineEpisode(context, episode) },
                                         onExport = { EpisodeExport.request(context, episode.id) },
                                         modifier = Modifier.weight(1f),
@@ -431,6 +438,12 @@ fun ProfileScreen(
                                         episode = episode,
                                         exportStatus = exportStatuses[episode.id],
                                         onPlay = { onPlayDownload(episode.id) },
+                                        onPauseToggle = {
+                                            episode.download?.let { download ->
+                                                if (download.isPaused) EpisodeDownloads.resume(context, episode.id)
+                                                else EpisodeDownloads.pause(context, episode.id)
+                                            }
+                                        },
                                         onRemove = { removeOfflineEpisode(context, episode) },
                                         onExport = { EpisodeExport.request(context, episode.id) },
                                     )
@@ -755,6 +768,7 @@ private fun EpisodeDownloadCard(
     episode: OfflineEpisode,
     exportStatus: EpisodeExportStatus?,
     onPlay: () -> Unit,
+    onPauseToggle: () -> Unit,
     onRemove: () -> Unit,
     onExport: () -> Unit,
     modifier: Modifier = Modifier,
@@ -898,6 +912,18 @@ private fun EpisodeDownloadCard(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    download?.takeIf { it.canPause || it.canResume }?.let { controlledDownload ->
+                        IconButton(onClick = onPauseToggle) {
+                            Icon(
+                                if (controlledDownload.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                contentDescription = if (controlledDownload.isPaused) {
+                                    "Resume download"
+                                } else {
+                                    "Pause download"
+                                },
+                            )
+                        }
+                    }
                     if (episode.isPlayable) {
                         // Offered per episode rather than only at download time, so one already
                         // sitting in the library can be lifted out to Downloads later.
@@ -999,7 +1025,7 @@ private fun EpisodeDownloadState.displayLabel(percent: Float?): String = when (t
     EpisodeDownloadState.FAILED -> "Download failed"
     EpisodeDownloadState.REMOVING -> "Removing"
     EpisodeDownloadState.RESTARTING -> "Restarting"
-    EpisodeDownloadState.STOPPED -> "Waiting"
+    EpisodeDownloadState.STOPPED -> percent?.let { "Paused at ${it.toInt()}%" } ?: "Paused"
 }
 
 private fun formatDownloadBytes(bytes: Long): String = when {

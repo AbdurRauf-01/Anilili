@@ -2,6 +2,7 @@
 
 package com.miruronative.ui.detail
 
+import android.view.inputmethod.EditorInfo
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -53,6 +54,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -76,16 +78,19 @@ import com.miruronative.data.model.Media
 import com.miruronative.data.settings.SettingsStore
 import kotlinx.coroutines.launch
 import com.miruronative.data.model.StudioNode
+import com.miruronative.ui.adaptive.TvNativeTextField
 import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.adaptive.tvFocusTarget
 import com.miruronative.ui.components.EpisodeArtwork
+import com.miruronative.ui.components.EPISODE_BROWSER_MIN_EPISODES
 import com.miruronative.ui.components.TvHeroArtwork
 import com.miruronative.ui.components.WatchProgressBar
 import com.miruronative.ui.components.blockIndexContaining
 import com.miruronative.ui.components.episodeBlocks
 import com.miruronative.ui.components.episodeArtworkImage
 import com.miruronative.ui.components.episodeWatchFraction
+import com.miruronative.ui.components.filterEpisodes
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -119,8 +124,14 @@ internal fun TvDetailContent(
     var selectedBlockIndex by remember(data.selectedSeasonId, episodeKeys) {
         mutableIntStateOf(blockIndexContaining(blocks, seasonResume?.episodeNumber))
     }
+    var episodeQuery by remember(data.selectedSeasonId, episodeKeys) { mutableStateOf("") }
+    var latestJumpRequest by remember(data.selectedSeasonId, episodeKeys) { mutableIntStateOf(0) }
     val blockIndex = selectedBlockIndex.coerceIn(0, (blocks.size - 1).coerceAtLeast(0))
-    val shownEpisodes = blocks.getOrNull(blockIndex)?.episodes.orEmpty()
+    val shownEpisodes = if (episodeQuery.isBlank()) {
+        blocks.getOrNull(blockIndex)?.episodes.orEmpty()
+    } else {
+        filterEpisodes(episodes, episodeQuery)
+    }
     val fallbackImage = data.seasons.firstOrNull { it.id == data.selectedSeasonId }
         ?.let { it.bannerImage ?: it.coverImage.best }
         ?: info.bannerImage
@@ -190,13 +201,24 @@ internal fun TvDetailContent(
                 selectedSeasonId = data.selectedSeasonId,
                 blocks = blocks.map { it.label },
                 selectedBlockIndex = blockIndex,
+                query = episodeQuery,
                 fallbackImage = fallbackImage,
                 resume = seasonResume,
                 loading = data.seasonEpisodesLoading,
                 episodeFocusTarget = episodeFocusTarget,
                 leftFocusRequester = primaryActionFocusRequester,
                 onSelectSeason = onSelectSeason,
-                onSelectBlock = { selectedBlockIndex = it },
+                onSelectBlock = {
+                    episodeQuery = ""
+                    selectedBlockIndex = it
+                },
+                onQueryChange = { episodeQuery = it },
+                onJumpToLatest = {
+                    episodeQuery = ""
+                    selectedBlockIndex = blocks.lastIndex.coerceAtLeast(0)
+                    latestJumpRequest++
+                },
+                latestJumpRequest = latestJumpRequest,
                 onPlay = { episode ->
                     onPlay(
                         data.selectedSeasonId,
@@ -460,6 +482,7 @@ private fun TvEpisodeBrowserPane(
     selectedSeasonId: Int,
     blocks: List<String>,
     selectedBlockIndex: Int,
+    query: String,
     fallbackImage: String?,
     resume: HistoryEntry?,
     loading: Boolean,
@@ -467,16 +490,46 @@ private fun TvEpisodeBrowserPane(
     leftFocusRequester: FocusRequester,
     onSelectSeason: (Int) -> Unit,
     onSelectBlock: (Int) -> Unit,
+    onQueryChange: (String) -> Unit,
+    onJumpToLatest: () -> Unit,
+    latestJumpRequest: Int,
     onPlay: (EpisodeItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val blurEpisodeImages by SettingsStore.blurEpisodeImages.collectAsState()
     val listState = rememberLazyListState()
     val resumeIndex = episodes.indexOfFirst { it.number == resume?.episodeNumber }.coerceAtLeast(0)
-    val initialScrollIndex = if (episodes.size <= 6) 0 else resumeIndex
+    val latestButtonFocusRequester = remember { FocusRequester() }
+    val latestEpisodeFocusRequester = remember { FocusRequester() }
+    var handledLatestJumpRequest by remember { mutableIntStateOf(latestJumpRequest) }
 
-    LaunchedEffect(selectedSeasonId, selectedBlockIndex, episodes.map(EpisodeItem::pipeId)) {
-        if (episodes.isNotEmpty()) listState.scrollToItem(initialScrollIndex)
+    LaunchedEffect(
+        selectedSeasonId,
+        selectedBlockIndex,
+        episodes.map(EpisodeItem::pipeId),
+        latestJumpRequest,
+    ) {
+        val jumpingToLatest = latestJumpRequest > handledLatestJumpRequest
+        val targetIndex = tvEpisodeScrollIndex(
+            episodes = episodes,
+            resumeEpisode = resume?.episodeNumber,
+            jumpToLatest = jumpingToLatest,
+        )
+        if (targetIndex >= 0) listState.scrollToItem(targetIndex)
+        if (jumpingToLatest && targetIndex >= 0) {
+            repeat(10) {
+                withFrameNanos {}
+                if (runCatching { latestEpisodeFocusRequester.requestFocus() }.isSuccess) {
+                    handledLatestJumpRequest = latestJumpRequest
+                    return@LaunchedEffect
+                }
+            }
+        }
+        handledLatestJumpRequest = latestJumpRequest
+    }
+
+    val requestFirstEpisodeFocus: () -> Unit = {
+        if (episodeFocusTarget.isAttached) runCatching { episodeFocusTarget.requester.requestFocus() }
     }
 
     Column(
@@ -536,6 +589,41 @@ private fun TvEpisodeBrowserPane(
             }
         }
 
+        if (allEpisodeCount >= EPISODE_BROWSER_MIN_EPISODES) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 20.dp, top = 9.dp)
+                    .focusGroup(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TvNativeTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    hint = "Find episode number or title",
+                    modifier = Modifier.weight(1f),
+                    imeAction = EditorInfo.IME_ACTION_SEARCH,
+                    onImeAction = requestFirstEpisodeFocus,
+                    onMoveDown = requestFirstEpisodeFocus,
+                    onMoveRight = { runCatching { latestButtonFocusRequester.requestFocus() } },
+                )
+                TvDetailFilterChip(
+                    label = "Latest",
+                    selected = false,
+                    onClick = onJumpToLatest,
+                    modifier = Modifier.focusRequester(latestButtonFocusRequester),
+                )
+                if (query.isNotBlank()) {
+                    TvDetailFilterChip(
+                        label = "Clear",
+                        selected = false,
+                        onClick = { onQueryChange("") },
+                    )
+                }
+            }
+        }
+
         when {
             episodes.isNotEmpty() -> LazyColumn(
                 state = listState,
@@ -556,12 +644,18 @@ private fun TvEpisodeBrowserPane(
                         watchedFraction = episodeWatchFraction(resume, episode.number),
                         isResumeEpisode = episode.number == resume?.episodeNumber,
                         focusTarget = episodeFocusTarget.takeIf { index == resumeIndex },
+                        focusRequester = latestEpisodeFocusRequester.takeIf { index == episodes.lastIndex },
                         leftFocusRequester = leftFocusRequester,
                         blockDown = index == episodes.lastIndex,
                         onClick = { onPlay(episode) },
                     )
                 }
             }
+            query.isNotBlank() -> Text(
+                text = "No episode matches “$query”.",
+                color = Color.White.copy(alpha = 0.58f),
+                modifier = Modifier.padding(20.dp),
+            )
             loading -> Text(
                 text = "Loading episodes…",
                 color = Color.White.copy(alpha = 0.58f),
@@ -576,18 +670,30 @@ private fun TvEpisodeBrowserPane(
     }
 }
 
+internal fun tvEpisodeScrollIndex(
+    episodes: List<EpisodeItem>,
+    resumeEpisode: Double?,
+    jumpToLatest: Boolean,
+): Int = when {
+    episodes.isEmpty() -> -1
+    jumpToLatest -> episodes.lastIndex
+    episodes.size <= 6 -> 0
+    else -> episodes.indexOfFirst { it.number == resumeEpisode }.coerceAtLeast(0)
+}
+
 @Composable
 private fun TvDetailFilterChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Text(
         text = label,
         color = if (selected) Color.White else Color.White.copy(alpha = 0.64f),
         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         fontSize = 12.sp,
-        modifier = Modifier
+        modifier = modifier
             .focusHighlight(RoundedCornerShape(9.dp), focusedScale = 1.05f)
             .clip(RoundedCornerShape(9.dp))
             .background(
@@ -614,6 +720,7 @@ private fun TvEpisodeListRow(
     watchedFraction: Float,
     isResumeEpisode: Boolean,
     focusTarget: TvFocusTarget?,
+    focusRequester: FocusRequester? = null,
     leftFocusRequester: FocusRequester,
     blockDown: Boolean,
     onClick: () -> Unit,
@@ -625,6 +732,7 @@ private fun TvEpisodeListRow(
             .fillMaxWidth()
             .zIndex(if (focused) 1f else 0f)
             .scale(scale)
+            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
             .tvFocusTarget(focusTarget)
             .focusProperties {
                 left = leftFocusRequester

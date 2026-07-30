@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.miruronative.diagnostics.CrashReporter
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.WebViewProcessController
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 import org.json.JSONObject
@@ -453,6 +454,7 @@ fun LoginWebView(
                                 }
                             }
                             loadUrl(authorizeUrl)
+                            WebViewProcessController.register(this, "account-login")
                             DiagnosticsLog.event(
                                 "LoginWebView load requested host=${authorizeUrl.oauthHost()}",
                             )
@@ -474,6 +476,7 @@ fun LoginWebView(
                     web.loadUrl("about:blank")
                     web.clearHistory()
                     web.removeAllViews()
+                    WebViewProcessController.release(web, "account-login")
                     web.destroy()
                 },
             )

@@ -88,6 +88,7 @@ import com.miruronative.data.settings.CaptionStyle
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.CrashReporter
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.WebViewProcessController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
@@ -780,6 +781,7 @@ fun EmbedWebView(
                         webChromeClient = chromeClient
                         installWebPlayerBootstrap(this)
                         webView = this
+                        WebViewProcessController.register(this, "embed-player")
                         DiagnosticsLog.event("EmbedWebView factory complete userAgent=${settings.userAgentString.take(100)}")
                     }
                 } catch (e: Throwable) {
@@ -824,6 +826,7 @@ fun EmbedWebView(
                 web.removeAllViews()
                 web.webChromeClient = null
                 web.webViewClient = WebViewClient()
+                WebViewProcessController.release(web, "embed-player")
                 web.destroy()
             },
         )

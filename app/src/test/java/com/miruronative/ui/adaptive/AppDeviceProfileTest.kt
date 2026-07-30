@@ -30,4 +30,47 @@ class AppDeviceProfileTest {
         assertTrue(profile.useNavigationRail)
         assertEquals(8, profile.episodeColumns)
     }
+
+    @Test
+    fun `low ram television uses low cost focus effects`() {
+        val profile = resolveAppDeviceProfile(
+            Configuration.UI_MODE_TYPE_TELEVISION,
+            960,
+            isLowRamDevice = true,
+            memoryClassMb = 512,
+        )
+
+        assertTrue(profile.useLowCostTvEffects)
+    }
+
+    @Test
+    fun `small heap television uses low cost focus effects even without low ram flag`() {
+        val profile = resolveAppDeviceProfile(
+            Configuration.UI_MODE_TYPE_TELEVISION,
+            960,
+            isLowRamDevice = false,
+            memoryClassMb = 192,
+        )
+
+        assertTrue(profile.useLowCostTvEffects)
+    }
+
+    @Test
+    fun `high memory television and handhelds keep standard effects`() {
+        assertFalse(
+            resolveAppDeviceProfile(
+                Configuration.UI_MODE_TYPE_TELEVISION,
+                960,
+                memoryClassMb = 512,
+            ).useLowCostTvEffects,
+        )
+        assertFalse(
+            resolveAppDeviceProfile(
+                Configuration.UI_MODE_TYPE_NORMAL,
+                412,
+                isLowRamDevice = true,
+                memoryClassMb = 128,
+            ).useLowCostTvEffects,
+        )
+    }
 }

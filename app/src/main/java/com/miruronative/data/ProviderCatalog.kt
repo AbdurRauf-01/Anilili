@@ -48,6 +48,10 @@ object ProviderCatalog {
     // whatever is already on screen — background validation skips these during playback.
     val webViewResolverProviders = setOf("reanime")
 
+    /** Any source lookup that must create a hidden browser, regardless of returned stream type. */
+    fun requiresResolverWebView(provider: String): Boolean =
+        sourceOf(provider) == Source.MIRURO || provider in webViewResolverProviders
+
     // The consistently quick Anivexa lookups (API-backed, not full-page scrapers). Raced as an
     // early partial catalog when the Miruro pipe is down or slow, so playback never waits for
     // the 15-second stragglers; the remaining providers still merge in behind.

@@ -1167,7 +1167,7 @@ internal fun preferredProviderForWatch(storedPreferred: String?, routeProvider: 
  * still resolves it normally.
  */
 internal fun validatesDuringPlayback(provider: String): Boolean =
-    provider !in ProviderCatalog.webViewResolverProviders
+    !ProviderCatalog.requiresResolverWebView(provider)
 
 private fun bestHls(streams: List<StreamItem>): StreamItem? = streams
     .filter(StreamItem::isHls)

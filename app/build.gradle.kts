@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
@@ -17,8 +18,8 @@ val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
             isIgnoreExitValue = true
         }.standardOutput.asText.get().trim()
     }.getOrDefault("unknown").ifBlank { "unknown" }
-val appVersionCode = 50
-val appVersionName = "0.1.49"
+val appVersionCode = 51
+val appVersionName = "0.1.50"
 
 val keystoreProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -181,6 +182,8 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.tvprovider)
     implementation(libs.zxing.core)
+    implementation(libs.androidx.profileinstaller)
+    baselineProfile(project(":benchmark"))
     testImplementation(libs.junit)
     testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation("androidx.test:core-ktx:1.6.1")

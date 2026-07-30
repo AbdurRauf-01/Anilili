@@ -39,6 +39,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 object HanimeBridge {
     private const val ORIGIN = "https://hanime.tv"
     private const val TAG = "HanimeBridge"
+    private val demand = ResolverDemand("hanime")
+    val resolverRequired = demand.required
 
     /** `stime` is a timestamp and the signature expires with it; re-read well inside its life. */
     private const val CREDENTIAL_TTL_MS = 5 * 60 * 1000L
@@ -59,6 +61,7 @@ object HanimeBridge {
     fun attach(wv: WebView) {
         DiagnosticsLog.event("$TAG.attach")
         webView = wv
+        com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("hanime", true)
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
         with(wv.settings) {
@@ -113,8 +116,12 @@ object HanimeBridge {
             @android.annotation.TargetApi(android.os.Build.VERSION_CODES.O)
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                 DiagnosticsLog.event("$TAG render process gone didCrash=${detail?.didCrash()}")
+                com.miruronative.diagnostics.ResolverDiagnostics.rendererGone("hanime", detail?.didCrash())
                 complete(activeId, null)
-                if (webView === view) webView = null
+                if (webView === view) {
+                    webView = null
+                    com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("hanime", false)
+                }
                 return true
             }
         }
@@ -124,6 +131,7 @@ object HanimeBridge {
         if (webView !== wv) return
         DiagnosticsLog.event("$TAG.detach")
         webView = null
+        com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("hanime", false)
         activeId = null
         pending.entries.toList().forEach { (id, deferred) ->
             if (pending.remove(id, deferred)) deferred.complete(null)
@@ -136,44 +144,59 @@ object HanimeBridge {
      */
     suspend fun credentials(timeoutMs: Long = 20_000): HanimeCredentials? = credentialMutex.withLock {
         cached?.takeIf { SystemClock.elapsedRealtime() - it.readAtMs < CREDENTIAL_TTL_MS }?.let { return it }
-        val wv = awaitWebView(timeoutMs) ?: return null
-        loadOnMain(wv, ORIGIN)
-        // The WASM publishes the pair a moment after the page settles, so poll rather than guess.
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val pair = withTimeoutOrNull(2_000) { readCredentials(wv) }
-            if (pair != null) {
-                DiagnosticsLog.event("$TAG credentials read time=${pair.time}")
-                cached = pair
-                main.post { if (activeId == null) wv.loadUrl("about:blank") }
-                return pair
+        val lease = demand.acquire()
+        try {
+            val wv = awaitWebView(timeoutMs) ?: return null
+            loadOnMain(wv, ORIGIN)
+            // The WASM publishes the pair a moment after the page settles, so poll rather than guess.
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val pair = withTimeoutOrNull(2_000) { readCredentials(wv) }
+                if (pair != null) {
+                    DiagnosticsLog.event("$TAG credentials read time=${pair.time}")
+                    cached = pair
+                    main.post { if (activeId == null) wv.loadUrl("about:blank") }
+                    return pair
+                }
+                kotlinx.coroutines.delay(400)
             }
-            kotlinx.coroutines.delay(400)
+            DiagnosticsLog.event("$TAG credentials timeout")
+            return null
+        } finally {
+            lease.close()
         }
-        DiagnosticsLog.event("$TAG credentials timeout")
-        return null
     }
 
     /**
      * The HLS URL for one video, by letting hanime's own player negotiate it. Serialised because a
      * single hidden WebView cannot run two page loads at once.
      */
-    suspend fun resolveStream(slug: String, timeoutMs: Long = 25_000): String? = streamMutex.withLock {
-        val wv = awaitWebView(timeoutMs) ?: return null
-        val id = counter.incrementAndGet().toString()
-        val deferred = CompletableDeferred<String?>()
-        pending[id] = deferred
-        activeId = id
-        val target = "$ORIGIN/videos/hentai/$slug"
-        DiagnosticsLog.event("$TAG resolve slug=$slug")
-        loadOnMain(wv, target)
-        val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
-        pending.remove(id)
-        if (activeId == id) activeId = null
-        // Always park the page — a live hanime tab left open keeps timers and media alive.
-        main.post { wv.loadUrl("about:blank") }
-        if (result == null) DiagnosticsLog.event("$TAG resolve timeout slug=$slug")
-        return result
+    suspend fun resolveStream(slug: String, timeoutMs: Long = 25_000): String? {
+        val lease = demand.acquire()
+        try {
+            return streamMutex.withLock {
+                val wv = awaitWebView(timeoutMs) ?: return@withLock null
+                val id = counter.incrementAndGet().toString()
+                val deferred = CompletableDeferred<String?>()
+                pending[id] = deferred
+                activeId = id
+                val target = "$ORIGIN/videos/hentai/$slug"
+                DiagnosticsLog.event("$TAG resolve slug=$slug")
+                try {
+                    loadOnMain(wv, target)
+                    val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
+                    if (result == null) DiagnosticsLog.event("$TAG resolve timeout slug=$slug")
+                    result
+                } finally {
+                    pending.remove(id)
+                    if (activeId == id) activeId = null
+                    // Always park the page — a live hanime tab left open keeps timers and media alive.
+                    main.post { wv.loadUrl("about:blank") }
+                }
+            }
+        } finally {
+            lease.close()
+        }
     }
 
     private suspend fun readCredentials(wv: WebView): HanimeCredentials? {

@@ -24,7 +24,7 @@ import android.view.Choreographer
 import android.view.Display
 import android.view.View
 import android.view.ViewTreeObserver
-import android.webkit.WebView
+import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.work.WorkManager
 import com.miruronative.BuildConfig
@@ -57,6 +57,14 @@ object DiagnosticsLog {
     private const val MAX_EXIT_TRACE_BYTES = 1_500_000L
     private const val PROCESS_STATE_MIN_INTERVAL_MS = 5_000L
     private const val MAX_RECENT_SUMMARY_EVENTS = 160
+    private val KNOWN_WEBVIEW_PROVIDERS = listOf(
+        "com.amazon.webview",
+        "com.google.android.webview",
+        "com.android.webview",
+        "com.google.android.webview.beta",
+        "com.google.android.webview.dev",
+        "com.google.android.webview.canary",
+    )
     private val categorySanitizer = Regex("[^A-Za-z0-9_-]")
     private val eventNameSanitizer = Regex("[^A-Za-z0-9_.-]")
     private val processSuffixSanitizer = Regex("[^A-Za-z0-9_.-]")
@@ -239,19 +247,37 @@ object DiagnosticsLog {
     }
 
     fun webViewPackage(label: String) {
-        val pkg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
-        } else {
-            null
+        // WebView.getCurrentWebViewPackage() looks like a metadata query but WebView 150 can fully
+        // initialize Chromium and launch a sandbox renderer. On a low-memory TV that diagnostic
+        // call alone consumed ~122 MB before any resolver existed. Read Android's selected
+        // provider setting and package metadata instead; an unknown provider is safer than
+        // starting a browser solely to identify it.
+        val context = appContext
+        val configuredPackage = context?.let {
+            runCatching { Settings.Global.getString(it.contentResolver, "webview_provider") }
+                .getOrNull()
+                ?.takeIf(String::isNotBlank)
+        }
+        @Suppress("DEPRECATION")
+        val pkg = context?.let { app ->
+            buildList {
+                configuredPackage?.let(::add)
+                addAll(KNOWN_WEBVIEW_PROVIDERS)
+            }.distinct().firstNotNullOfOrNull { candidate ->
+                runCatching { app.packageManager.getPackageInfo(candidate, 0) }
+                    .getOrNull()
+                    ?.takeIf { it.applicationInfo?.enabled != false }
+            }
         }
         event(
             category = "webview",
             name = "webview.package",
             attributes = mapOf(
                 "label" to label,
-                "package" to (pkg?.packageName ?: "none"),
+                "package" to (pkg?.packageName ?: configuredPackage ?: "unknown"),
                 "version" to (pkg?.versionName ?: "none"),
                 "versionCode" to (pkg?.longVersionCodeCompat() ?: 0L),
+                "lookup" to "selected-provider-setting",
             ),
         )
     }
@@ -612,7 +638,7 @@ object DiagnosticsLog {
             },
             "display" to displaySummary(display),
             "hdrTypes" to hdrTypes,
-        )
+        ) + ResolverDiagnostics.snapshotAttributes() + WebViewProcessController.snapshotAttributes()
     }
 
     @Suppress("DEPRECATION")

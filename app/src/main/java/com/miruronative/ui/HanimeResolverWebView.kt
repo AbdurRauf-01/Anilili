@@ -11,6 +11,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.miruronative.data.remote.HanimeBridge
 import com.miruronative.diagnostics.CrashReporter
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.WebViewProcessController
 
 /**
  * Hidden resolver WebView for hanime. Not a player surface; it exists so the site's own WASM can
@@ -34,6 +35,7 @@ fun HanimeResolverWebView() {
                     // overlay path — see PipeWebView for details.
                     it.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     HanimeBridge.attach(it)
+                    WebViewProcessController.register(it, "hanime-resolver")
                     DiagnosticsLog.event("HanimeResolverWebView factory create WebView complete")
                 }
             } catch (e: Throwable) {
@@ -49,6 +51,7 @@ fun HanimeResolverWebView() {
             web.webChromeClient = null
             web.webViewClient = WebViewClient()
             web.loadUrl("about:blank")
+            WebViewProcessController.release(web, "hanime-resolver")
             web.destroy()
         },
         modifier = Modifier.size(1.dp),

@@ -1,5 +1,7 @@
 package com.miruronative.ui.adaptive
 
+import android.app.ActivityManager
+import android.content.Context
 import android.content.res.Configuration
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
@@ -17,6 +19,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -27,11 +30,15 @@ enum class AppFormFactor { PHONE, TABLET, TV }
 data class AppDeviceProfile(
     val formFactor: AppFormFactor,
     val widthDp: Int,
+    val isLowRamDevice: Boolean = false,
+    val memoryClassMb: Int? = null,
 ) {
     val isTv: Boolean get() = formFactor == AppFormFactor.TV
     val isTablet: Boolean get() = formFactor == AppFormFactor.TABLET
     val isExpanded: Boolean get() = widthDp >= 840 || isTv
     val useNavigationRail: Boolean get() = widthDp >= 600 || isTv
+    val useLowCostTvEffects: Boolean
+        get() = shouldUseLowCostTvEffects(isTv, isLowRamDevice, memoryClassMb)
 
     val pagePadding: Dp
         get() = when {
@@ -76,14 +83,24 @@ data class AppDeviceProfile(
         }
 }
 
-fun resolveAppDeviceProfile(uiModeType: Int, widthDp: Int): AppDeviceProfile {
+fun resolveAppDeviceProfile(
+    uiModeType: Int,
+    widthDp: Int,
+    isLowRamDevice: Boolean = false,
+    memoryClassMb: Int? = null,
+): AppDeviceProfile {
     val formFactor = when {
         uiModeType == Configuration.UI_MODE_TYPE_TELEVISION -> AppFormFactor.TV
         widthDp >= 600 -> AppFormFactor.TABLET
         else -> AppFormFactor.PHONE
     }
-    return AppDeviceProfile(formFactor, widthDp)
+    return AppDeviceProfile(formFactor, widthDp, isLowRamDevice, memoryClassMb)
 }
+
+internal fun shouldUseLowCostTvEffects(isTv: Boolean, isLowRamDevice: Boolean, memoryClassMb: Int?): Boolean =
+    isTv && (isLowRamDevice || (memoryClassMb != null && memoryClassMb <= LOW_COST_TV_MEMORY_CLASS_MB))
+
+private const val LOW_COST_TV_MEMORY_CLASS_MB = 256
 
 val LocalAppDeviceProfile = staticCompositionLocalOf {
     AppDeviceProfile(AppFormFactor.PHONE, 360)
@@ -92,9 +109,15 @@ val LocalAppDeviceProfile = staticCompositionLocalOf {
 @Composable
 fun rememberAppDeviceProfile(): AppDeviceProfile {
     val configuration = LocalConfiguration.current
+    val context = LocalContext.current
     val uiModeType = configuration.uiMode and Configuration.UI_MODE_TYPE_MASK
-    return remember(uiModeType, configuration.screenWidthDp) {
-        resolveAppDeviceProfile(uiModeType, configuration.screenWidthDp)
+    val activityManager = remember(context.applicationContext) {
+        context.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    }
+    val lowRam = activityManager?.isLowRamDevice == true
+    val memoryClassMb = activityManager?.memoryClass
+    return remember(uiModeType, configuration.screenWidthDp, lowRam, memoryClassMb) {
+        resolveAppDeviceProfile(uiModeType, configuration.screenWidthDp, lowRam, memoryClassMb)
     }
 }
 
@@ -105,15 +128,28 @@ fun Modifier.focusHighlight(
     focusedScale: Float = if (LocalAppDeviceProfile.current.isTv) 1.06f else 1.025f,
 ): Modifier {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) focusedScale else 1f,
-        label = "focused-scale",
-    )
+    val lowCostTvEffects = LocalAppDeviceProfile.current.useLowCostTvEffects
+    val scale = if (lowCostTvEffects) {
+        1f
+    } else {
+        val animatedScale by animateFloatAsState(
+            targetValue = if (focused) focusedScale else 1f,
+            label = "focused-scale",
+        )
+        animatedScale
+    }
     val borderColor = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent
     return this
         .onFocusChanged { focused = it.isFocused || it.hasFocus }
-        .zIndex(if (focused) 1f else 0f)
-        .scale(scale)
-        .clip(shape)
-        .border(width = if (focused) 3.dp else 0.dp, color = borderColor, shape = shape)
+        .then(
+            if (lowCostTvEffects) {
+                if (focused) Modifier.border(width = 3.dp, color = borderColor, shape = shape) else Modifier
+            } else {
+                Modifier
+                    .zIndex(if (focused) 1f else 0f)
+                    .scale(scale)
+                    .clip(shape)
+                    .border(width = if (focused) 3.dp else 0.dp, color = borderColor, shape = shape)
+            },
+        )
 }

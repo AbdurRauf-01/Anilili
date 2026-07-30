@@ -11,6 +11,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.miruronative.data.remote.FlixcloudBridge
 import com.miruronative.diagnostics.CrashReporter
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.WebViewProcessController
 
 /**
  * Hidden resolver WebView for flixcloud embeds. It is not a player surface; it only lets
@@ -31,6 +32,7 @@ fun FlixcloudResolverWebView() {
                     // overlay path — see PipeWebView for details.
                     it.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     FlixcloudBridge.attach(it)
+                    WebViewProcessController.register(it, "flixcloud-resolver")
                     DiagnosticsLog.event("FlixcloudResolverWebView factory create WebView complete")
                 }
             } catch (e: Throwable) {
@@ -46,6 +48,7 @@ fun FlixcloudResolverWebView() {
             web.webChromeClient = null
             web.webViewClient = WebViewClient()
             web.loadUrl("about:blank")
+            WebViewProcessController.release(web, "flixcloud-resolver")
             web.destroy()
         },
         modifier = Modifier.size(1.dp),

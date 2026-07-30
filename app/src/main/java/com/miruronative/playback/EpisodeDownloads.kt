@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.webkit.WebSettings
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -184,9 +183,11 @@ object EpisodeDownloads {
                 NoOpCacheEvictor(),
                 databaseProvider,
             )
-            userAgent = runCatching {
-                WebSettings.getDefaultUserAgent(appContext).replace("; wv", "")
-            }.getOrDefault(FALLBACK_USER_AGENT)
+            // WebSettings.getDefaultUserAgent() initializes the complete Chromium renderer on
+            // current Android WebView builds. Downloads are native HTTP work, so use the same
+            // browser-compatible UA we already used when that lookup failed instead of paying
+            // for a hidden browser process on Home and beside native playback.
+            userAgent = NATIVE_PLAYBACK_USER_AGENT
             val httpFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent(userAgent)
                 .setAllowCrossProtocolRedirects(true)
@@ -860,7 +861,4 @@ object EpisodeDownloads {
     private const val PROGRESS_REFRESH_MS = 1_000L
     private const val USER_PAUSED_STOP_REASON = 1
     private val SUPPORTED_SUBTITLE_EXTENSIONS = setOf("vtt", "srt", "ass", "ssa", "ttml", "xml")
-    private const val FALLBACK_USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 }

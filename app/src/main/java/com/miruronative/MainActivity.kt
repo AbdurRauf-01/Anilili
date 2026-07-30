@@ -106,6 +106,9 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.library.LibraryStore
+import com.miruronative.data.remote.FlixcloudBridge
+import com.miruronative.data.remote.HanimeBridge
+import com.miruronative.data.remote.PipeBridge
 import com.miruronative.data.reminder.AutomaticReleaseManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.CrashReportDialog
@@ -393,7 +396,6 @@ private fun MiruroRoot(
     val currentRoute = Routes.tabRoute(backStack?.destination?.route)
     val showBottomBar = currentRoute in Routes.tabRoutes
     val menuLanguage by SettingsStore.menuLanguage.collectAsState()
-    var resolverWebViewsReady by remember { mutableStateOf(false) }
     var chromeVisible by remember { mutableStateOf(true) }
     val chromeScope = rememberCoroutineScope()
     var restoreChromeJob by remember { mutableStateOf<Job?>(null) }
@@ -442,12 +444,6 @@ private fun MiruroRoot(
         )
     }
 
-    LaunchedEffect(Unit) {
-        delay(if (deviceProfile.isTv) 3_000 else 1_000)
-        resolverWebViewsReady = true
-        DiagnosticsLog.event("Resolver WebView startup delay elapsed")
-    }
-
     LaunchedEffect(currentRoute) {
         DiagnosticsLog.event("Nav route=${currentRoute ?: "none"}")
     }
@@ -463,6 +459,32 @@ private fun MiruroRoot(
     }
 
     val context = LocalContext.current
+    val pipeResolverRequired by PipeBridge.resolverRequired.collectAsState()
+    val flixcloudResolverRequired by FlixcloudBridge.resolverRequired.collectAsState()
+    val hanimeResolverRequired by HanimeBridge.resolverRequired.collectAsState()
+    val hideAdult by SettingsStore.hideAdultContent.collectAsState()
+
+    LaunchedEffect(hideAdult) {
+        if (!hideAdult) {
+            // Credentials and the catalogue still warm proactively when adult content is enabled,
+            // but the Hanime resolver exists only for the duration of that real request.
+            com.miruronative.data.AppGraph.repository.warmHanimeCatalogue()
+        }
+    }
+
+    LaunchedEffect(deviceProfile.isTv, currentRoute) {
+        // A watch deep link can be the process's first screen. Do not let a launch-only library
+        // refresh wake up halfway through that episode; returning to a top-level tab starts this
+        // bounded delay afresh. Explicit login/list/permission syncs still bypass this path.
+        if (currentRoute !in Routes.tabRoutes) return@LaunchedEffect
+        SettingsStore.awaitLoaded()
+        // Keep notification/library network fan-out away from first composition and the initial
+        // D-pad focus hand-off. A freshness check below prevents activity recreation from turning
+        // this bounded delay into repeated work.
+        delay(if (deviceProfile.isTv) 15_000 else 8_000)
+        ReleaseSyncScheduler.runAfterStartupIfStale(context)
+    }
+
     LaunchedEffect(Unit) {
         SettingsStore.awaitLoaded()
         if (!SettingsStore.updateCheckOnLaunch.value) {
@@ -583,26 +605,18 @@ private fun MiruroRoot(
                     }
                 }
             }
-            // Hidden resolver WebViews are not needed for Home. On slow Android TV boxes,
-            // creating WebView during first composition can delay the first visible frame.
-            // Account OAuth uses another full-screen WebView. Release the resident resolver
-            // WebViews while Library/Profile is open so memory-starved TVs do not make AniList's
-            // login renderer stall before its JavaScript app mounts.
-            if (resolverWebViewsReady && currentRoute != Routes.MORE) {
+            // Resolver browsers are expensive on low-memory TVs and are never players. Keep each
+            // one attached only while its bridge has a real request waiting or running. Their
+            // reference-counted demand survives concurrent repository calls, while disposal after
+            // the last request prevents an idle Chromium renderer from competing with playback.
+            if (pipeResolverRequired) {
                 PipeWebView()
+            }
+            if (flixcloudResolverRequired) {
                 FlixcloudResolverWebView()
-                // Only carried once adult content is on. A viewer who never enables it does not
-                // pay for a third resident WebView — which matters most on memory-starved sticks.
-                val hideAdult by SettingsStore.hideAdultContent.collectAsState()
-                if (!hideAdult) {
-                    HanimeResolverWebView()
-                    // The catalogue is a single bulk file with no per-title endpoint behind it, so
-                    // fetch it while the viewer is still in Settings rather than making their
-                    // first search wait for it.
-                    LaunchedEffect(Unit) {
-                        com.miruronative.data.AppGraph.repository.warmHanimeCatalogue()
-                    }
-                }
+            }
+            if (!hideAdult && hanimeResolverRequired) {
+                HanimeResolverWebView()
             }
         }
     }
@@ -830,7 +844,8 @@ private fun NotificationPermissionEffect() {
         }
         if (device.isTv || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@LaunchedEffect
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-            ReleaseSyncScheduler.runNow(context)
+            // The launch-wide, freshness-gated effect handles an already-granted permission.
+            // A permission granted by the user in this session still runs immediately above.
             return@LaunchedEffect
         }
         val prefs = context.getSharedPreferences("anilili_permissions", Context.MODE_PRIVATE)

@@ -30,6 +30,9 @@ data class RawPipeResponse(val ok: Boolean, val status: Int, val obf: String?, v
  */
 @SuppressLint("StaticFieldLeak")
 object PipeBridge {
+    private val demand = ResolverDemand("pipe")
+    val resolverRequired = demand.required
+
     /**
      * Mirror domains, tried in order. ISPs block these piecemeal (user logs show .to timing out
      * on one network while others resolve), so a main-frame load failure rolls to the next
@@ -115,6 +118,7 @@ object PipeBridge {
     fun attach(wv: WebView) {
         DiagnosticsLog.event("PipeBridge.attach")
         webView = wv
+        com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("pipe", true)
         if (ready.isCompleted) ready = CompletableDeferred()
 
         CookieManager.getInstance().setAcceptCookie(true)
@@ -189,6 +193,7 @@ object PipeBridge {
                     "PipeBridge render process gone didCrash=${detail?.didCrash()} " +
                         "priority=${detail?.rendererPriorityAtExit()}",
                 )
+                com.miruronative.diagnostics.ResolverDiagnostics.rendererGone("pipe", detail?.didCrash())
                 view?.let(::detach)
                 return true
             }
@@ -206,7 +211,9 @@ object PipeBridge {
         if (webView !== wv) return
         DiagnosticsLog.event("PipeBridge.detach")
         main.removeCallbacks(idleRunnable)
+        main.removeCallbacks(mirrorWatchdog)
         webView = null
+        com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("pipe", false)
         ready = CompletableDeferred()
         pending.entries.toList().forEach { (id, request) ->
             if (pending.remove(id, request)) {
@@ -225,52 +232,65 @@ object PipeBridge {
 
     /** Runs `fetch('/api/secure/pipe?e=…')` inside the page and returns the raw JSON bridge payload. */
     suspend fun fetch(e: String, timeoutMs: Long = 30_000): String {
-        withTimeoutOrNull(25_000) { ready.await() }
-        val id = counter.incrementAndGet().toString()
-        val deferred = CompletableDeferred<String>()
-        pending[id] = deferred
+        val lease = demand.acquire()
+        var requestId: String? = null
+        try {
+            val pageReady = withTimeoutOrNull(25_000) { ready.await() } == true
+            if (!pageReady) {
+                DiagnosticsLog.event("PipeBridge page unavailable e.len=${e.length}")
+                return """{"ok":false,"status":-1,"error":"webview page unavailable"}"""
+            }
 
-        val js = """
-            (function(){
-              try {
-                fetch('/api/secure/pipe?e=$e', { headers: { 'Accept': '*/*' }, credentials: 'include' })
-                  .then(function(r){
-                    return r.text().then(function(b){
-                      AndroidPipe.onResult('$id', JSON.stringify({
-                        ok: r.ok, status: r.status,
-                        obf: (r.headers.get('x-obfuscated') || ''), body: b
-                      }));
-                    });
-                  })
-                  .catch(function(err){
+            val id = counter.incrementAndGet().toString()
+            requestId = id
+            val deferred = CompletableDeferred<String>()
+            pending[id] = deferred
+
+            val js = """
+                (function(){
+                  try {
+                    fetch('/api/secure/pipe?e=$e', { headers: { 'Accept': '*/*' }, credentials: 'include' })
+                      .then(function(r){
+                        return r.text().then(function(b){
+                          AndroidPipe.onResult('$id', JSON.stringify({
+                            ok: r.ok, status: r.status,
+                            obf: (r.headers.get('x-obfuscated') || ''), body: b
+                          }));
+                        });
+                      })
+                      .catch(function(err){
+                        AndroidPipe.onResult('$id', JSON.stringify({ ok:false, status:-1, error:String(err) }));
+                      });
+                  } catch (err) {
                     AndroidPipe.onResult('$id', JSON.stringify({ ok:false, status:-1, error:String(err) }));
-                  });
-              } catch (err) {
-                AndroidPipe.onResult('$id', JSON.stringify({ ok:false, status:-1, error:String(err) }));
-              }
-            })();
-        """.trimIndent()
+                  }
+                })();
+            """.trimIndent()
 
-        main.post {
-            val wv = webView
-            if (wv == null) {
-                pending.remove(id)?.complete("""{"ok":false,"status":-1,"error":"webview not ready"}""")
-            } else {
-                main.removeCallbacks(idleRunnable)
-                wv.onResume()
-                wv.evaluateJavascript(js, null)
+            main.post {
+                val wv = webView
+                if (wv == null) {
+                    pending.remove(id)?.complete("""{"ok":false,"status":-1,"error":"webview not ready"}""")
+                } else {
+                    main.removeCallbacks(idleRunnable)
+                    wv.onResume()
+                    wv.evaluateJavascript(js, null)
+                }
             }
+
+            val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
+                ?: run {
+                    pending.remove(id)
+                    DiagnosticsLog.event("PipeBridge fetch timeout e.len=${e.length}")
+                    """{"ok":false,"status":-1,"error":"timeout"}"""
+                }
+            scheduleIdleIfUnused()
+            Log.d(TAG, "fetch(e.len=${e.length}) -> ${result.take(180)}")
+            return result
+        } finally {
+            requestId?.let(pending::remove)
+            lease.close()
         }
-
-        val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
-            ?: run {
-                pending.remove(id)
-                DiagnosticsLog.event("PipeBridge fetch timeout e.len=${e.length}")
-                """{"ok":false,"status":-1,"error":"timeout"}"""
-            }
-        scheduleIdleIfUnused()
-        Log.d(TAG, "fetch(e.len=${e.length}) -> ${result.take(180)}")
-        return result
     }
 
     private const val TAG = "PipeBridge"

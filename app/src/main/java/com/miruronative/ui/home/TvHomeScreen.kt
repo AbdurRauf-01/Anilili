@@ -75,6 +75,7 @@ import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.model.Media
 import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.adaptive.focusHighlight
+import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.tvFocusTarget
 import com.miruronative.ui.components.ContinueWatchingActionsDialog
 import com.miruronative.ui.components.TvHeroArtwork
@@ -518,14 +519,21 @@ internal fun TvMediaCard(
     cardWidth: Dp = TvMediaCardWidth,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-media-card-scale")
+    val lowCostTvEffects = LocalAppDeviceProfile.current.useLowCostTvEffects
+    val scale = if (lowCostTvEffects) {
+        1f
+    } else {
+        val animatedScale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-media-card-scale")
+        animatedScale
+    }
     val image = media.heroImage
 
     Column(
         modifier = modifier
             .width(cardWidth)
-            .zIndex(if (focused) 1f else 0f)
-            .scale(scale)
+            .then(
+                if (lowCostTvEffects) Modifier else Modifier.zIndex(if (focused) 1f else 0f).scale(scale),
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 onFocused(it.isFocused)
@@ -667,13 +675,20 @@ private fun TvContinueCard(
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-continue-card-scale")
+    val lowCostTvEffects = LocalAppDeviceProfile.current.useLowCostTvEffects
+    val scale = if (lowCostTvEffects) {
+        1f
+    } else {
+        val animatedScale by animateFloatAsState(if (focused) 1.045f else 1f, label = "tv-continue-card-scale")
+        animatedScale
+    }
 
     Column(
         modifier = modifier
             .width(TvRailCardWidth)
-            .zIndex(if (focused) 1f else 0f)
-            .scale(scale)
+            .then(
+                if (lowCostTvEffects) Modifier else Modifier.zIndex(if (focused) 1f else 0f).scale(scale),
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 onFocused(it.isFocused)

@@ -46,7 +46,9 @@ class MiruroApp : Application(), ImageLoaderFactory {
             "MiruroApp process=${currentProcessName() ?: "unknown"} pid=${Process.myPid()} " +
                 "thread=${Thread.currentThread().name} abis=${Build.SUPPORTED_ABIS.joinToString()}",
         )
-        DiagnosticsLog.webViewPackage("MiruroApp.onCreate")
+        // Do not query WebView during ordinary startup. Some provider builds initialize the
+        // Chromium process even for metadata-looking calls. The actual resolver/login/player
+        // factories record the provider after a WebView is genuinely needed.
         if (isDiagnosticsProcess()) {
             DiagnosticsLog.event("MiruroApp diagnostics process; skipping normal app init")
             return

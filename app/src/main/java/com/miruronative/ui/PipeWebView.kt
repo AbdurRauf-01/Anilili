@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.size
 import com.miruronative.data.remote.PipeBridge
 import com.miruronative.diagnostics.CrashReporter
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.WebViewProcessController
 
 /**
  * Hidden 1dp WebView that hosts the Cloudflare-cleared miruro.to session. It stays attached to the
@@ -35,6 +36,7 @@ fun PipeWebView() {
                     // the hardware overlay of even a 1dp WebView can black out the whole window.
                     it.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                     PipeBridge.attach(it)
+                    WebViewProcessController.register(it, "pipe-resolver")
                     DiagnosticsLog.event("PipeWebView factory create WebView complete")
                 }
             } catch (e: Throwable) {
@@ -49,6 +51,7 @@ fun PipeWebView() {
             web.stopLoading()
             web.webChromeClient = null
             web.webViewClient = android.webkit.WebViewClient()
+            WebViewProcessController.release(web, "pipe-resolver")
             web.destroy()
         },
         modifier = Modifier.size(1.dp),

@@ -126,7 +126,7 @@ class WatchSourcePolicyTest {
     @Test
     fun `background sweep never starts a hidden player during playback`() {
         assertEquals(false, validatesDuringPlayback("reanime"))
-        assertTrue(validatesDuringPlayback("bonk"))
+        assertEquals(false, validatesDuringPlayback("bonk"))
         assertTrue(validatesDuringPlayback("anibd"))
     }
 

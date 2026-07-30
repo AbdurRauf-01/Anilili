@@ -5,7 +5,6 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.os.Build
 import android.view.KeyEvent
-import android.webkit.WebSettings
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -59,8 +58,8 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         DiagnosticsLog.event("PlaybackService.onCreate")
-        val playerUserAgent = runCatching { WebSettings.getDefaultUserAgent(this).replace("; wv", "") }
-            .getOrDefault(FALLBACK_PLAYER_USER_AGENT)
+        // Native Media3 playback must not initialize Chromium just to obtain an HTTP header.
+        val playerUserAgent = NATIVE_PLAYBACK_USER_AGENT
         activeUserAgent = playerUserAgent
         val defaultHttpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(playerUserAgent)
@@ -376,10 +375,6 @@ class PlaybackService : MediaSessionService() {
 
     companion object {
         const val EXTRA_WATCH_ROUTE = "watch_route"
-        private const val FALLBACK_PLAYER_USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
-
         @Volatile
         private var activeHttpFactory: HttpDataSource.Factory? = null
 
@@ -390,7 +385,7 @@ class PlaybackService : MediaSessionService() {
         @Volatile
         private var activeAvoidCronet: Boolean = false
         @Volatile
-        private var activeUserAgent: String = FALLBACK_PLAYER_USER_AGENT
+        private var activeUserAgent: String = NATIVE_PLAYBACK_USER_AGENT
         @Volatile
         private var activePlaylistKey: String? = null
         @Volatile

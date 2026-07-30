@@ -33,6 +33,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 object FlixcloudBridge {
     private const val ORIGIN = "https://flixcloud.cc"
     private const val TAG = "FlixcloudBridge"
+    private val demand = ResolverDemand("flixcloud")
+    val resolverRequired = demand.required
 
     private val main = Handler(Looper.getMainLooper())
     private val counter = AtomicLong(0)
@@ -46,6 +48,7 @@ object FlixcloudBridge {
     fun attach(wv: WebView) {
         DiagnosticsLog.event("$TAG.attach")
         webView = wv
+        com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("flixcloud", true)
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
         with(wv.settings) {
@@ -114,8 +117,12 @@ object FlixcloudBridge {
             @android.annotation.TargetApi(android.os.Build.VERSION_CODES.O)
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                 DiagnosticsLog.event("$TAG render process gone didCrash=${detail?.didCrash()}")
+                com.miruronative.diagnostics.ResolverDiagnostics.rendererGone("flixcloud", detail?.didCrash())
                 complete(activeId, null, "render_gone")
-                if (webView === view) webView = null
+                if (webView === view) {
+                    webView = null
+                    com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("flixcloud", false)
+                }
                 return true
             }
         }
@@ -125,6 +132,7 @@ object FlixcloudBridge {
         if (webView !== wv) return
         DiagnosticsLog.event("$TAG.detach")
         webView = null
+        com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("flixcloud", false)
         activeId = null
         pending.entries.toList().forEach { (id, deferred) ->
             if (pending.remove(id, deferred)) deferred.complete(null)
@@ -139,21 +147,31 @@ object FlixcloudBridge {
         // sticks give up sooner and fall back to the embed rather than keep a second player
         // parked alongside playback.
         timeoutMs: Long = if (AppGraph.isTv) 5_000 else 12_000,
-    ): FlixcloudResolvedStream? = mutex.withLock {
-        val id = counter.incrementAndGet().toString()
-        val deferred = CompletableDeferred<FlixcloudResolvedStream?>()
-        pending[id] = deferred
-        activeId = id
-        val target = captureUrl(embedUrl)
-        loadWhenAttached(id, target, referer, SystemClock.elapsedRealtime() + timeoutMs)
-        val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
-        if (!deferred.isCompleted) {
-            pending.remove(id)
-            DiagnosticsLog.event("$TAG timeout host=${target.hostOrNone()}")
-            main.post { if (activeId == id) webView?.loadUrl("about:blank") }
+    ): FlixcloudResolvedStream? {
+        val lease = demand.acquire()
+        try {
+            return mutex.withLock {
+                val id = counter.incrementAndGet().toString()
+                val deferred = CompletableDeferred<FlixcloudResolvedStream?>()
+                pending[id] = deferred
+                activeId = id
+                val target = captureUrl(embedUrl)
+                try {
+                    loadWhenAttached(id, target, referer, SystemClock.elapsedRealtime() + timeoutMs)
+                    val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
+                    if (!deferred.isCompleted) {
+                        DiagnosticsLog.event("$TAG timeout host=${target.hostOrNone()}")
+                    }
+                    result?.takeIf { isHlsUrl(it.url) }
+                } finally {
+                    pending.remove(id)
+                    if (activeId == id) activeId = null
+                    main.post { webView?.loadUrl("about:blank") }
+                }
+            }
+        } finally {
+            lease.close()
         }
-        if (activeId == id) activeId = null
-        result?.takeIf { isHlsUrl(it.url) }
     }
 
     private fun loadWhenAttached(id: String, target: String, referer: String?, deadlineMs: Long) {

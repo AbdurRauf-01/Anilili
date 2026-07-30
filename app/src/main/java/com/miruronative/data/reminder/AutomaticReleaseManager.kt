@@ -28,11 +28,14 @@ import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.model.Media
 import com.miruronative.data.settings.SettingsStore
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.nav.Routes
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -223,6 +226,8 @@ class AutomaticReleaseReceiver : BroadcastReceiver() {
 object ReleaseSyncScheduler {
     private const val PERIODIC_NAME = "automatic-release-sync"
     private const val IMMEDIATE_NAME = "automatic-release-sync-now"
+    private const val SYNC_STATE_PREFERENCES = "automatic-release-sync-state"
+    private const val LAST_SUCCESS_UTC_MS = "last-success-utc-ms"
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
     fun schedule(context: Context) {
@@ -235,21 +240,54 @@ object ReleaseSyncScheduler {
             ExistingPeriodicWorkPolicy.UPDATE,
             request,
         )
-        runNow(context)
     }
 
     fun runNow(context: Context) {
+        enqueueNow(context, ExistingWorkPolicy.REPLACE, "explicit")
+    }
+
+    /** Launch-only refresh: explicit user/auth/list actions continue to use [runNow]. */
+    fun runAfterStartupIfStale(context: Context, nowUtcMs: Long = System.currentTimeMillis()) {
+        if (!SettingsStore.releaseNotifications.value) return
+        val app = context.applicationContext
+        val lastSuccess = app.getSharedPreferences(SYNC_STATE_PREFERENCES, Context.MODE_PRIVATE)
+            .getLong(LAST_SUCCESS_UTC_MS, 0L)
+        if (!shouldRunStartupReleaseSync(nowUtcMs, lastSuccess)) {
+            DiagnosticsLog.event(
+                "release_sync",
+                "startup.skipped_fresh",
+                mapOf("ageMs" to (nowUtcMs - lastSuccess).coerceAtLeast(0)),
+            )
+            return
+        }
+        enqueueNow(app, ExistingWorkPolicy.KEEP, "startup_stale")
+    }
+
+    internal fun markSuccessful(context: Context, nowUtcMs: Long = System.currentTimeMillis()) {
+        context.applicationContext.getSharedPreferences(SYNC_STATE_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(LAST_SUCCESS_UTC_MS, nowUtcMs)
+            .apply()
+    }
+
+    private fun enqueueNow(context: Context, policy: ExistingWorkPolicy, reason: String) {
         val request = OneTimeWorkRequestBuilder<ReleaseSyncWorker>()
             .addTag("release-sync")
             .setConstraints(network)
             .build()
+        DiagnosticsLog.event("release_sync", "work.enqueued", mapOf("reason" to reason, "policy" to policy.name))
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
             IMMEDIATE_NAME,
-            ExistingWorkPolicy.REPLACE,
+            policy,
             request,
         )
     }
 }
+
+internal fun shouldRunStartupReleaseSync(nowUtcMs: Long, lastSuccessUtcMs: Long): Boolean =
+    lastSuccessUtcMs <= 0L || nowUtcMs < lastSuccessUtcMs || nowUtcMs - lastSuccessUtcMs >= 60 * 60 * 1_000L
+
+internal fun releaseSyncParallelism(isTv: Boolean): Int = if (isTv) 2 else 4
 
 class ReleaseSyncWorker(
     context: Context,
@@ -262,9 +300,15 @@ class ReleaseSyncWorker(
         }
         return try {
             val repo = AppGraph.repository
+            val parallelism = releaseSyncParallelism(AppGraph.isTv)
+            val semaphore = Semaphore(parallelism)
             val localSaved = coroutineScope {
                 LibraryStore.watchlist.value.map { saved ->
-                    async { runCatching { repo.animeInfo(saved.anilistId) }.getOrNull() }
+                    async {
+                        semaphore.withPermit {
+                            runCatching { repo.animeInfo(saved.anilistId) }.getOrNull()
+                        }
+                    }
                 }.awaitAll().filterNotNull()
             }
             if (AuthManager.isLoggedIn) {
@@ -282,6 +326,12 @@ class ReleaseSyncWorker(
             } else {
                 AutomaticReleaseManager.sync(localSaved.distinctBy { it.id })
             }
+            ReleaseSyncScheduler.markSuccessful(applicationContext)
+            DiagnosticsLog.event(
+                "release_sync",
+                "work.succeeded",
+                mapOf("savedItems" to localSaved.size, "parallelism" to parallelism),
+            )
             Result.success()
         } catch (_: Exception) {
             Result.retry()

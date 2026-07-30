@@ -124,9 +124,34 @@ class WatchSourcePolicyTest {
     }
 
     @Test
+    fun `source miss retries when the first catalog snapshot predated the full merge`() {
+        assertTrue(
+            shouldRetryWithMergedCatalog(
+                hasResolvedSource = false,
+                initialCatalogIncludedFullAnivexa = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryWithMergedCatalog(
+                hasResolvedSource = false,
+                initialCatalogIncludedFullAnivexa = true,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryWithMergedCatalog(
+                hasResolvedSource = true,
+                initialCatalogIncludedFullAnivexa = false,
+            ),
+        )
+    }
+
+    @Test
     fun `background sweep never starts a hidden player during playback`() {
         assertEquals(false, validatesDuringPlayback("reanime"))
         assertEquals(false, validatesDuringPlayback("bonk"))
+        assertEquals(false, validatesDuringPlayback("allanime"))
         assertTrue(validatesDuringPlayback("anibd"))
     }
 

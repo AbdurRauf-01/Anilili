@@ -1,11 +1,9 @@
 package com.miruronative.data.remote
 
-/**
- * Versioned values copied from a specific MKissa web-client deployment.
- *
- * Keeping them together makes a client rotation an explicit, reviewable update instead of
- * scattering a new build ID, request hash, and crypto mask through the provider.
- */
+internal const val ALLANIME_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+/** Current MKissa route plus optional pinned crypto material used by deterministic tests. */
 internal data class AllAnimeProtocolVersion(
     val version: String,
     val buildId: String,
@@ -17,18 +15,24 @@ internal data class AllAnimeProtocolVersion(
     val apiReferer: String,
     val apiOrigin: String,
     val playerReferer: String,
+    val siteUrl: String = "https://mkissa.to",
+    val contentLane: String = "k7",
+    val keyGroup: String = "mkissa",
 ) {
     val currentApi: String get() = "$currentApiOrigin/api"
-    val bootstrapUrl: String get() = "$currentApiOrigin/client-crypto/v1/bootstrap?buildId=$buildId"
+    val currentReferer: String get() = "$siteUrl/anime/"
+    fun bootstrapUrl(build: String): String =
+        "$currentApiOrigin/client-crypto/v1/bootstrap?buildId=$build&k=$contentLane"
 }
 
 internal object AllAnimeProtocolConfig {
     val active = AllAnimeProtocolVersion(
-        version = "mkissa-build-44",
-        buildId = "44",
-        currentSourcesHash = "09caca435564416f37d5c78256c8e6e517007c3006529857e84ba2466bfcbea6",
+        version = "mkissa-dynamic-v1",
+        // The live site rotates both values on rebuild. Empty means discover them from its bundle.
+        buildId = "",
+        currentSourcesHash = "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0",
         legacySourcesHash = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec",
-        cryptoMask = "cd7f14dbf40734836eb46eb14758e49ef9d81e61686d84d467b2e32063ef4af9",
+        cryptoMask = "",
         currentApiOrigin = "https://api.mkissa.net",
         legacyApi = "https://api.allanime.day/api",
         apiReferer = "https://youtu-chan.com/",

@@ -434,17 +434,26 @@ class WatchViewModel : ViewModel() {
         val previous = (_state.value as? UiState.Success)?.data
         _state.value = previous?.let { UiState.Success(it.copy(isResolving = true, notice = null)) }
             ?: UiState.Loading
+        // Keep completion state paired with the exact catalog snapshot passed to the first
+        // resolution. The background merge can finish while that resolution is suspended; using
+        // the live flag afterward would falsely imply that the first attempt saw those providers.
+        val initialCatalogIncludedFullAnivexa = mergedIncludesAnivexa
+        val initialEpisodes = mergedEpisodes
         var resolution = repo.resolveSources(
             anilistId = anilistId,
             number = number,
             preferred = requestedProvider,
             category = category,
-            episodes = mergedEpisodes,
+            episodes = initialEpisodes,
             excludedProviders = failedProviders,
         )
         val unavailableThisResolve = resolution.unavailableProviders.toMutableSet()
         var resolved = resolution.resolved
-        if (resolved == null && !mergedIncludesAnivexa) {
+        val shouldRetryMergedCatalog = shouldRetryWithMergedCatalog(
+            hasResolvedSource = resolved != null,
+            initialCatalogIncludedFullAnivexa = initialCatalogIncludedFullAnivexa,
+        )
+        if (shouldRetryMergedCatalog) {
             // The quick partial catalog missed; the slower servers may still carry this episode,
             // so wait for the full merge before declaring no source.
             DiagnosticsLog.event(
@@ -989,6 +998,7 @@ class WatchViewModel : ViewModel() {
                                 episodes = mergedEpisodes,
                                 excludedProviders = providerNames - option.provider,
                                 maxAttempts = 1,
+                                allowInteractiveChallenges = false,
                             )
                         }.onFailure {
                             DiagnosticsLog.throwable(
@@ -1160,6 +1170,15 @@ internal fun preferredProviderForWatch(storedPreferred: String?, routeProvider: 
 }
 
 /**
+ * A merge that completes while the first resolution is suspended still requires a retry: the
+ * deciding state is whether the catalog snapshot used by that resolution already contained it.
+ */
+internal fun shouldRetryWithMergedCatalog(
+    hasResolvedSource: Boolean,
+    initialCatalogIncludedFullAnivexa: Boolean,
+): Boolean = !hasResolvedSource && !initialCatalogIncludedFullAnivexa
+
+/**
  * Whether the background sweep may confirm this provider while an episode is on screen.
  * Providers that resolve through the hidden WebView run a real player to do it. Even larger
  * devices can have a single hardware decoder, and a background resolver may preempt playback or
@@ -1167,7 +1186,7 @@ internal fun preferredProviderForWatch(storedPreferred: String?, routeProvider: 
  * still resolves it normally.
  */
 internal fun validatesDuringPlayback(provider: String): Boolean =
-    !ProviderCatalog.requiresResolverWebView(provider)
+    provider != "allanime" && !ProviderCatalog.requiresResolverWebView(provider)
 
 private fun bestHls(streams: List<StreamItem>): StreamItem? = streams
     .filter(StreamItem::isHls)

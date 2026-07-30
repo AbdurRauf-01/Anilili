@@ -7,7 +7,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/** Launcher entry that shares diagnostics without booting the normal Compose/WebView app. */
+/** Launcher entry that sends diagnostics without booting the normal Compose/WebView app. */
 class ShareDiagnosticsActivity : Activity() {
     private val scope = MainScope()
 
@@ -15,14 +15,15 @@ class ShareDiagnosticsActivity : Activity() {
         super.onCreate(savedInstanceState)
         DiagnosticsLog.event("ShareDiagnosticsActivity.onCreate")
         scope.launch {
-            DiagnosticsLog.share(this@ShareDiagnosticsActivity)
-                .onFailure { error ->
-                    Toast.makeText(
-                        this@ShareDiagnosticsActivity,
-                        error.message ?: "Couldn't share diagnostics",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
+            val result = DiagnosticsUploadManager.send(
+                this@ShareDiagnosticsActivity,
+                DiagnosticTrigger.SHORTCUT,
+            )
+            Toast.makeText(
+                this@ShareDiagnosticsActivity,
+                result.userMessage(),
+                Toast.LENGTH_LONG,
+            ).show()
             finish()
         }
     }

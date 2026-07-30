@@ -13,6 +13,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.res.painterResource
 import com.miruronative.R
+import com.miruronative.BuildConfig
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -81,7 +82,8 @@ import com.miruronative.data.settings.MAX_SERVER_PRIORITY
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.settings.MenuLanguage
 import com.miruronative.data.update.UpdateManager
-import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.DiagnosticTrigger
+import com.miruronative.diagnostics.DiagnosticsUploadManager
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
@@ -134,7 +136,7 @@ fun SettingsScreen(
     var malImportBusy by remember { mutableStateOf(false) }
     var malImportMessage by remember { mutableStateOf<String?>(null) }
     var diagnosticsMessage by remember { mutableStateOf<String?>(null) }
-    var tvDiagnosticsVisible by remember { mutableStateOf(false) }
+    var diagnosticsBusy by remember { mutableStateOf(false) }
     var captionAppearanceVisible by remember { mutableStateOf(false) }
     var cacheUsage by remember { mutableStateOf<Long?>(null) }
     var cacheClearing by remember { mutableStateOf(false) }
@@ -150,10 +152,6 @@ fun SettingsScreen(
     LaunchedEffect(token, malLoggedIn) { vm.loadIfLoggedIn() }
     LaunchedEffect(Unit) {
         cacheUsage = withContext(Dispatchers.IO) { CacheManager.usageBytes(context) }
-    }
-
-    if (tvDiagnosticsVisible) {
-        TvDiagnosticsShareDialog(onDismiss = { tvDiagnosticsVisible = false })
     }
 
     if (captionAppearanceVisible) {
@@ -540,19 +538,21 @@ fun SettingsScreen(
             }
             item {
                 SettingsAction(
-                    title = "Share diagnostics",
-                    icon = { Icon(Icons.Default.Share, contentDescription = null) },
-                    enabled = true,
+                    title = "Send diagnostics",
+                    description = if (BuildConfig.DIAGNOSTICS_UPLOAD_URL.isNotBlank()) {
+                        "Uploads a full debugging report. Passwords, cookies, tokens and sensitive links are removed."
+                    } else {
+                        "Temporarily unavailable while the private diagnostics service is being activated."
+                    },
+                    icon = { Icon(Icons.Default.Upload, contentDescription = null) },
+                    enabled = !diagnosticsBusy && BuildConfig.DIAGNOSTICS_UPLOAD_URL.isNotBlank(),
                     onClick = {
-                        diagnosticsMessage = null
-                        if (device.isTv) {
-                            // TV has no ACTION_SEND targets — use LAN sharing with optional Downloads.
-                            tvDiagnosticsVisible = true
-                        } else {
-                            scope.launch {
-                                DiagnosticsLog.share(context)
-                                    .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
-                            }
+                        diagnosticsBusy = true
+                        diagnosticsMessage = "Preparing and sending the full diagnostic report…"
+                        scope.launch {
+                            val result = DiagnosticsUploadManager.send(context, DiagnosticTrigger.MANUAL)
+                            diagnosticsMessage = result.userMessage()
+                            diagnosticsBusy = false
                         }
                     },
                 )
@@ -998,6 +998,7 @@ private fun SettingSwitch(
 @Composable
 private fun SettingsAction(
     title: String,
+    description: String? = null,
     icon: @Composable () -> Unit,
     enabled: Boolean,
     onClick: () -> Unit,
@@ -1009,7 +1010,16 @@ private fun SettingsAction(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
     ) {
         icon()
-        Text(title, modifier = Modifier.padding(start = 10.dp).weight(1f))
+        Column(modifier = Modifier.padding(start = 10.dp).weight(1f)) {
+            Text(title)
+            description?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

@@ -96,6 +96,7 @@ class AnivexaClient(
     // cancel the async calls below immediately; this client is also a hard backstop for the few
     // legacy provider parsers that still execute synchronous OkHttp calls.
     private val providerClient = client.newBuilder()
+        .addInterceptor(ProviderResponseLimitInterceptor(PROVIDER_RESPONSE_MAX_BYTES))
         .connectTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .callTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -103,10 +104,15 @@ class AnivexaClient(
 
     private val mediaCache = boundedMap<Int, Media>(100)
     private val identityCache = boundedMap<String, String>(250)
-    private val allAnime = AllAnimeProvider(providerClient, json)
+    private val allAnime = AllAnimeProvider(
+        providerClient,
+        json,
+        buildStore = AllAnimeBuildStore.preferences(context),
+    )
     private val animeKai = AnimeKaiProvider(providerClient)
     private val senshi = SenshiProvider(providerClient, json)
     private val aniBd = AniBdProvider(providerClient, json)
+    private val aniDbApp = AniDbAppProvider(providerClient, json)
     private val kickAssAnime = KickAssAnimeProvider(providerClient, json)
     private val rareAnimes = RareAnimesProvider(providerClient)
     private val hanime = HanimeProvider(context, providerClient, json, cache)
@@ -177,7 +183,11 @@ class AnivexaClient(
         }
     }
 
-    suspend fun getSources(episodeId: String, seedMedia: Media? = null): SourcesResult {
+    suspend fun getSources(
+        episodeId: String,
+        seedMedia: Media? = null,
+        allowInteractiveChallenges: Boolean = true,
+    ): SourcesResult {
         val request = NativeProviderParsers.episodeRequest(episodeId)
             ?: error("Invalid native provider episode id: $episodeId")
         seedMedia?.let { mediaCache[request.anilistId] = it }
@@ -185,8 +195,13 @@ class AnivexaClient(
         return when (request.provider) {
             "senshi" -> runInterruptible(Dispatchers.IO) { senshi.sources(media, request.audio, request.episode) }
             "anibd" -> runInterruptible(Dispatchers.IO) { aniBd.sources(media, request.audio, request.episode) }
+            "anidbapp" -> runInterruptible(Dispatchers.IO) { aniDbApp.sources(media, request.audio, request.episode) }
             "anikoto" -> anikoto(media, request.audio, request.episode)
-            "allanime" -> runInterruptible(Dispatchers.IO) { allAnime.sources(media, request.audio, request.episode) }
+            "allanime" -> if (allowInteractiveChallenges) {
+                allAnime.sourcesInteractive(media, request.audio, request.episode)
+            } else {
+                runInterruptible(Dispatchers.IO) { allAnime.sources(media, request.audio, request.episode) }
+            }
             "animekai" -> runInterruptible(Dispatchers.IO) { animeKai.sources(media, request.audio, request.episode) }
             "kaa" -> runInterruptible(Dispatchers.IO) { kickAssAnime.sources(media, request.audio, request.episode) }
             "rareanimes" -> runInterruptible(Dispatchers.IO) { rareAnimes.sources(media, request.audio, request.episode) }
@@ -222,6 +237,7 @@ class AnivexaClient(
     private suspend fun providerAvailability(provider: String, media: Media, count: Int): EpisodeAvailability = when (provider) {
         "senshi" -> runInterruptible(Dispatchers.IO) { senshi.episodeAvailability(media) }
         "anibd" -> runInterruptible(Dispatchers.IO) { aniBd.episodeAvailability(media) }
+        "anidbapp" -> runInterruptible(Dispatchers.IO) { aniDbApp.episodeAvailability(media, count) }
         "anikoto" -> anikotoAvailability(media, count)
         "allanime" -> runInterruptible(Dispatchers.IO) { allAnime.episodeAvailability(media) }
         "animekai" -> runInterruptible(Dispatchers.IO) { animeKai.episodeAvailability(media) }
@@ -1037,6 +1053,7 @@ class AnivexaClient(
     companion object {
         private const val CATALOG_TIMEOUT_MS = 15_000L
         private const val PROVIDER_HTTP_CALL_TIMEOUT_MS = 15_000L
+        private const val PROVIDER_RESPONSE_MAX_BYTES = 8L * 1024L * 1024L
         private val REANIME_BAD_DUB_MUXES = setOf(113415 to 2)
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"

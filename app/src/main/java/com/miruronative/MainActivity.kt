@@ -121,6 +121,7 @@ import com.miruronative.data.update.UpdateManager
 import com.miruronative.ui.detail.DetailScreen
 import com.miruronative.ui.FlixcloudResolverWebView
 import com.miruronative.ui.HanimeResolverWebView
+import com.miruronative.ui.AllAnimeCaptchaHost
 import com.miruronative.ui.home.HomeScreen
 import com.miruronative.ui.PipeWebView
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
@@ -195,12 +196,21 @@ class MainActivity : FragmentActivity() {
                             pendingRoute = pendingRoute,
                             onRouteConsumed = { pendingRoute = null },
                         )
+                        AllAnimeCaptchaHost()
                         var crashReport by remember { mutableStateOf(CrashReporter.pendingReport()) }
                         crashReport?.let { report ->
-                            CrashReportDialog(report) {
-                                CrashReporter.clear()
-                                crashReport = null
-                            }
+                            CrashReportDialog(
+                                report = report,
+                                onAccepted = {
+                                    // The snapshot is already uploaded or durably staged before this clears.
+                                    CrashReporter.clear()
+                                    crashReport = null
+                                },
+                                onDiscard = {
+                                    CrashReporter.clear()
+                                    crashReport = null
+                                },
+                            )
                         }
                         AnimatedVisibility(
                             visible = showLaunchSplash,

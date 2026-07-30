@@ -8,6 +8,6 @@
     <string name="export_notification_preparing">Preparing the MP4…</string>
     <string name="export_notification_progress">Building the MP4 · %1$d%%</string>
     <string name="diagnostics_shortcut_short">Diagnostics</string>
-    <string name="diagnostics_shortcut_long">Share diagnostics</string>
+    <string name="diagnostics_shortcut_long">Send diagnostics</string>
     <string name="diagnostics_shortcut_disabled">Diagnostics are unavailable</string>
 </resources>

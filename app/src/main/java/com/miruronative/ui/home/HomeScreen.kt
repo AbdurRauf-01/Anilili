@@ -97,6 +97,8 @@ import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.model.Media
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.DiagnosticTrigger
+import com.miruronative.diagnostics.DiagnosticsUploadManager
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.TvFocusTarget
 import com.miruronative.ui.components.ErrorBox
@@ -159,8 +161,10 @@ fun HomeScreen(
                         onRetry = { vm.load(force = true) },
                         onShareDiagnostics = {
                             diagnosticsScope.launch {
-                                DiagnosticsLog.share(context)
-                                    .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                                diagnosticsMessage = "Preparing and sending diagnostics…"
+                                diagnosticsMessage = DiagnosticsUploadManager
+                                    .send(context, DiagnosticTrigger.SLOW_START)
+                                    .userMessage()
                             }
                         },
                         modifier = modifier.padding(top = 82.dp),
@@ -246,8 +250,10 @@ fun HomeScreen(
                         onRetry = { vm.load(force = true) },
                         onShareDiagnostics = {
                             diagnosticsScope.launch {
-                                DiagnosticsLog.share(context)
-                                    .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                                diagnosticsMessage = "Preparing and sending diagnostics…"
+                                diagnosticsMessage = DiagnosticsUploadManager
+                                    .send(context, DiagnosticTrigger.SLOW_START)
+                                    .userMessage()
                             }
                         },
                         modifier = Modifier.padding(padding),
@@ -300,7 +306,7 @@ private fun StartupStillLoading(
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                "If the screen stays blank, share diagnostics from here.",
+                "If the screen stays blank, send diagnostics from here.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -309,7 +315,7 @@ private fun StartupStillLoading(
                     Text("Retry")
                 }
                 Button(onClick = onShareDiagnostics, modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp))) {
-                    Text("Share diagnostics")
+                    Text("Send diagnostics")
                 }
             }
             message?.let {

@@ -27,6 +27,9 @@ class DiagnosticsHttpEventListener private constructor(private val callId: Long)
     private var responseBytes = -1L
     private var host = "unknown"
     private var method = "unknown"
+    private var serverTiming = "none"
+    private var serverInstanceAge = "none"
+    private var serverColdStart = "none"
 
     override fun callStart(call: Call) {
         startedMs = SystemClock.elapsedRealtime()
@@ -68,6 +71,9 @@ class DiagnosticsHttpEventListener private constructor(private val callId: Long)
         responseHeadersMs = elapsedSince(startedMs)
         responseCode = response.code
         responseProtocol = response.protocol.toString()
+        serverTiming = response.header("Server-Timing")?.take(240) ?: "none"
+        serverInstanceAge = response.header("X-Anilili-Instance-Age")?.take(40) ?: "none"
+        serverColdStart = response.header("X-Anilili-Cold-Start")?.take(20) ?: "none"
         cache = when {
             response.cacheResponse != null && response.networkResponse != null -> "conditional"
             response.cacheResponse != null -> "hit"
@@ -104,6 +110,9 @@ class DiagnosticsHttpEventListener private constructor(private val callId: Long)
                 "protocol" to responseProtocol,
                 "cache" to cache,
                 "responseBytes" to responseBytes,
+                "serverTiming" to serverTiming,
+                "serverInstanceAge" to serverInstanceAge,
+                "serverColdStart" to serverColdStart,
                 "failureType" to (failure?.javaClass?.simpleName ?: "none"),
                 "failureMessage" to (failure?.message ?: "none"),
             ),

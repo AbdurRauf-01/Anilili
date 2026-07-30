@@ -5,7 +5,6 @@ import android.app.ActivityManager
 import android.app.Application
 import android.app.ApplicationExitInfo
 import android.app.ApplicationStartInfo
-import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -25,11 +24,8 @@ import android.view.Display
 import android.view.View
 import android.view.ViewTreeObserver
 import android.provider.Settings
-import androidx.core.content.FileProvider
 import androidx.work.WorkManager
 import com.miruronative.BuildConfig
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.PrintWriter
@@ -80,7 +76,6 @@ object DiagnosticsLog {
     private val sessionId = UUID.randomUUID().toString()
     private val processStartedElapsedMs = SystemClock.elapsedRealtime()
     private val sequence = AtomicLong(0)
-    private val shareInProgress = AtomicBoolean(false)
 
     fun init(context: Context) {
         val app = context.applicationContext
@@ -398,76 +393,6 @@ object DiagnosticsLog {
                 ?.setProcessStateSummary(safe)
         }.onFailure { throwable("process state summary unavailable", it) }
     }
-
-    suspend fun share(context: Context): Result<Unit> {
-        if (!shareInProgress.compareAndSet(false, true)) return Result.success(Unit)
-        try {
-            event("share", "report.share_requested")
-            val reportResult = withContext(Dispatchers.IO) {
-                runCatching { createShareSnapshot(context.applicationContext) }
-            }
-            val report = reportResult.getOrElse { error ->
-                throwable("diagnostics share failed", error)
-                return Result.failure(error)
-            }
-            return try {
-                withContext(Dispatchers.Main.immediate) {
-                    val uri = FileProvider.getUriForFile(
-                        context,
-                        "${context.packageName}.fileprovider",
-                        report,
-                    )
-                    val send = Intent(Intent.ACTION_SEND)
-                        .setType("application/zip")
-                        .putExtra(Intent.EXTRA_SUBJECT, "Anilili diagnostics")
-                        .putExtra(
-                            Intent.EXTRA_TEXT,
-                            "Anilili diagnostics are attached. Common sensitive values are redacted; " +
-                                "Android native crash traces can contain low-level device or process details.",
-                        )
-                        .putExtra(Intent.EXTRA_STREAM, uri)
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    send.clipData = ClipData.newUri(context.contentResolver, "Anilili diagnostics", uri)
-                    val chooser = Intent.createChooser(send, "Share diagnostics")
-                    if (context !is Activity) chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(chooser)
-                }
-                Result.success(Unit)
-            } catch (error: Throwable) {
-                throwable("diagnostics share failed", error)
-                Result.failure(error)
-            }
-        } finally {
-            shareInProgress.set(false)
-        }
-    }
-
-    /** Explicit TV action: writes the already-redacted ZIP to public Downloads. */
-    fun saveToDownloads(context: Context, report: File): Result<String> = runCatching {
-        val name = "Anilili-diagnostics-${fileTimestamp()}.zip"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/zip")
-            }
-            val uri = context.contentResolver.insert(
-                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                values,
-            ) ?: error("Couldn't create a Downloads entry")
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                report.inputStream().use { it.copyTo(out) }
-            } ?: error("Couldn't write to Downloads")
-        } else {
-            @Suppress("DEPRECATION")
-            val directory = android.os.Environment.getExternalStoragePublicDirectory(
-                android.os.Environment.DIRECTORY_DOWNLOADS,
-            )
-            directory.mkdirs()
-            report.copyTo(File(directory, name), overwrite = true)
-        }
-        event("share", "report.saved_to_downloads", mapOf("fileName" to name))
-        "Downloads/$name"
-    }.onFailure { throwable("diagnostics downloads save failed", it) }
 
     @Synchronized
     fun createShareSnapshot(context: Context): File {

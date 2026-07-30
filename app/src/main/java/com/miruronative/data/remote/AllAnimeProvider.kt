@@ -13,6 +13,8 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -35,14 +37,11 @@ internal class AllAnimeProvider(
     private val client: OkHttpClient,
     private val json: Json,
     private val protocol: AllAnimeProtocolVersion = AllAnimeProtocolConfig.active,
+    private val currentRouteGuard: AllAnimeCurrentRouteGuard = AllAnimeCurrentRouteGuard(),
+    buildStore: AllAnimeBuildStore = AllAnimeBuildStore.memory(),
+    private val captchaRequester: suspend (String) -> AllAnimeCaptchaSolution? = AllAnimeCaptchaCoordinator::request,
 ) {
     internal enum class SourceRoute { CURRENT, LEGACY }
-
-    private data class CryptoBootstrap(
-        val epoch: Int,
-        val partB: String,
-        val switchAt: Long?,
-    )
 
     private data class SourcePayload(
         val sources: List<AllAnimeCodec.Source>,
@@ -56,6 +55,8 @@ internal class AllAnimeProvider(
     )
 
     private class CurrentRouteRateLimit(message: String) : IllegalStateException(message)
+    private class CurrentRouteCryptoError(message: String) : IllegalStateException(message)
+    private data class RouteError(val message: String, val needsCaptcha: Boolean, val cryptoFailure: Boolean)
 
     private data class Candidate(
         val id: String,
@@ -67,6 +68,7 @@ internal class AllAnimeProvider(
     )
 
     private val showIds = ConcurrentHashMap<Int, String>()
+    private val keyManager = AllAnimeKeyManager(client, json, protocol, buildStore)
     @Volatile
     internal var lastSourceRoute: SourceRoute? = null
         private set
@@ -79,6 +81,36 @@ internal class AllAnimeProvider(
 
     fun sources(media: Media, audio: String, episode: Int): SourcesResult {
         return sources(media, audio, episode, allowLegacyFallback = true)
+    }
+
+    /** Interactive playback path. Background catalog/source probes deliberately use [sources]. */
+    suspend fun sourcesInteractive(media: Media, audio: String, episode: Int): SourcesResult {
+        val showId = withContext(Dispatchers.IO) {
+            showIds[media.id] ?: resolveShow(media, audio).also { showIds[media.id] = it }
+        }
+        return sourcesForShowInteractive(showId, audio, episode)
+    }
+
+    internal suspend fun sourcesForShowInteractive(
+        showId: String,
+        audio: String,
+        episode: Int,
+    ): SourcesResult {
+        val payload = try {
+            withContext(Dispatchers.IO) { fetchSourcePayload(showId, audio, episode, allowLegacyFallback = true) }
+        } catch (required: AllAnimeCaptchaRequiredException) {
+            if (!required.currentRoute) throw required
+            val solution = captchaRequester("${protocol.currentApiOrigin}/captcha/turnstile")
+                ?: throw IllegalStateException("AllAnime security check was cancelled")
+            withContext(Dispatchers.IO) {
+                DiagnosticsLog.event("AllAnime CAPTCHA retry start provider=${solution.provider}")
+                fetchCurrentSourcePayload(showId, audio, episode, solution).also {
+                    currentRouteGuard.recordSuccess()
+                    DiagnosticsLog.event("AllAnime CAPTCHA retry succeeded")
+                }
+            }
+        }
+        return withContext(Dispatchers.IO) { sourcesFromPayload(payload, audio, episode) }
     }
 
     internal fun sources(
@@ -98,6 +130,10 @@ internal class AllAnimeProvider(
         allowLegacyFallback: Boolean = true,
     ): SourcesResult {
         val payload = fetchSourcePayload(showId, audio, episode, allowLegacyFallback)
+        return sourcesFromPayload(payload, audio, episode)
+    }
+
+    private fun sourcesFromPayload(payload: SourcePayload, audio: String, episode: Int): SourcesResult {
         lastSourceRoute = payload.route
         val native = mutableListOf<StreamItem>()
         val embeds = mutableListOf<StreamItem>()
@@ -105,11 +141,10 @@ internal class AllAnimeProvider(
 
         payload.sources.sortedByDescending(AllAnimeCodec.Source::priority).forEach { source ->
             if (source.name.equals("Ss-Hls", true)) return@forEach
-            val rawUrl = source.url
-            if (rawUrl.startsWith("--")) {
-                val path = AllAnimeCodec.decodeSourceUrl(rawUrl)
-                if (path.contains("/clock")) {
-                    val clock = resolveClock(path, audio, source.name)
+            val rawUrl = AllAnimeCodec.decodeSourceUrl(source.url)
+            if (AllAnimeCodec.isEncodedSource(source.url)) {
+                if (rawUrl.contains("/clock") || rawUrl.startsWith("/apivtwo/")) {
+                    val clock = resolveClock(rawUrl, audio, source.name)
                     native += clock.streams
                     subtitles += clock.subtitles
                 }
@@ -219,15 +254,40 @@ internal class AllAnimeProvider(
         episode: Int,
         allowLegacyFallback: Boolean,
     ): SourcePayload {
+        if (!currentRouteGuard.shouldAttempt()) {
+            val suppressed = IllegalStateException(
+                "AllAnime current route temporarily suppressed after a protocol mismatch",
+            )
+            logFailure(
+                "AllAnime ${protocol.version} current route skipped show=$showId audio=$audio episode=$episode" +
+                    if (allowLegacyFallback) "; using legacy" else "; legacy disabled",
+                suppressed,
+            )
+            if (!allowLegacyFallback) throw suppressed
+            return fetchLegacySourcePayload(showId, audio, episode)
+        }
+
         val current = runCatching {
-            retryOnce("AllAnime ${protocol.version} current source route") {
+            retryCurrentRoute("AllAnime ${protocol.version} current source route") {
                 fetchCurrentSourcePayload(showId, audio, episode)
             }
         }
-        current.getOrNull()?.takeIf { it.sources.isNotEmpty() }?.let { return it }
+        current.getOrNull()?.takeIf { it.sources.isNotEmpty() }?.let {
+            currentRouteGuard.recordSuccess()
+            return it
+        }
 
         val currentFailure = current.exceptionOrNull()
             ?: IllegalStateException("AllAnime current source route returned no sources")
+        // CAPTCHA is a valid upstream response, not a protocol mismatch and not a reason to make
+        // the same unauthenticated request against the legacy host.
+        if (currentFailure is AllAnimeCaptchaRequiredException) throw currentFailure
+        if (currentRouteGuard.recordFailure(currentFailure)) {
+            logFailure(
+                "AllAnime ${protocol.version} current route disabled temporarily after protocol mismatch",
+                currentFailure,
+            )
+        }
         logFailure(
             "AllAnime ${protocol.version} current route failed show=$showId audio=$audio episode=$episode" +
                 if (allowLegacyFallback) "; trying legacy" else "; legacy disabled",
@@ -237,21 +297,39 @@ internal class AllAnimeProvider(
         return fetchLegacySourcePayload(showId, audio, episode)
     }
 
-    /**
-     * MKissa/AllAnime's current episode route uses a short-lived, epoch-keyed AES-GCM request
-     * envelope. Its bootstrap endpoint supplies the current epoch half; the other half is bundled
-     * with the client and XOR-combined exactly as the web client does. This avoids
-     * baking expiring media URLs into the app while retaining the legacy endpoint as a fallback.
-     */
-    private fun fetchCurrentSourcePayload(showId: String, audio: String, episode: Int): SourcePayload {
-        val bootstrap = cryptoBootstrap()
-        val key = AllAnimeCodec.epochKey(bootstrap.partB, protocol.cryptoMask)
-        val aaReq = AllAnimeCodec.signRequest(
-            key = key,
-            epoch = bootstrap.epoch,
-            buildId = protocol.buildId,
+    private fun fetchCurrentSourcePayload(
+        showId: String,
+        audio: String,
+        episode: Int,
+        captcha: AllAnimeCaptchaSolution? = null,
+    ): SourcePayload {
+        var lastCryptoError: Throwable? = null
+        repeat(MAX_KEY_ATTEMPTS) { attempt ->
+            val material = keyManager.material(forceRefresh = attempt > 0)
+            try {
+                return fetchCurrentSourcePayloadOnce(showId, audio, episode, captcha, material)
+            } catch (error: CurrentRouteCryptoError) {
+                lastCryptoError = error
+                keyManager.invalidate(clearBuild = attempt >= 1)
+                logFailure("AllAnime current crypto rejected attempt=${attempt + 1}", error)
+            }
+        }
+        throw lastCryptoError ?: IllegalStateException("AllAnime current crypto failed")
+    }
+
+    private fun fetchCurrentSourcePayloadOnce(
+        showId: String,
+        audio: String,
+        episode: Int,
+        captcha: AllAnimeCaptchaSolution?,
+        material: AllAnimeKeyManager.Material,
+    ): SourcePayload {
+        val aaReq = AllAnimeMkissaCrypto.signRequest(
+            key = material.key,
+            epoch = material.epoch,
+            buildId = material.buildId,
             queryHash = protocol.currentSourcesHash,
-            nowMs = System.currentTimeMillis(),
+            lane = protocol.contentLane,
         )
         val variables = buildJsonObject {
             put("showId", showId)
@@ -263,16 +341,40 @@ internal class AllAnimeProvider(
                 put("version", 1)
                 put("sha256Hash", protocol.currentSourcesHash)
             }
+            put("k", protocol.contentLane)
             put("aaReq", aaReq)
+            captcha?.let { solution ->
+                putJsonObject("captcha") {
+                    put("token", solution.token)
+                    put("provider", solution.provider)
+                }
+            }
         }
-        val url = protocol.currentApi.toHttpUrl().newBuilder()
-            .addQueryParameter("variables", variables.toString())
-            .addQueryParameter("extensions", extensions.toString())
-            .build()
-        val request = Request.Builder().url(url).get().currentApiHeaders().build()
+        val request = if (captcha == null) {
+            val url = protocol.currentApi.toHttpUrl().newBuilder()
+                .addQueryParameter("variables", variables.toString())
+                .addQueryParameter("extensions", extensions.toString())
+                .build()
+            Request.Builder().url(url).get().currentApiHeaders(material.buildId).build()
+        } else {
+            // Keep the short-lived challenge token out of URLs, logs, caches, and browser history.
+            val body = buildJsonObject {
+                put("variables", variables)
+                put("extensions", extensions)
+            }.toString().toRequestBody(JSON_MEDIA_TYPE)
+            Request.Builder()
+                .url(protocol.currentApi)
+                .post(body)
+                .currentApiHeaders(material.buildId)
+                .header("Content-Type", "application/json")
+                .build()
+        }
         val root = json.parseToJsonElement(executeText(request)) as? JsonObject
             ?: error("AllAnime returned invalid source data")
-        currentRouteError(root)?.let { message ->
+        currentRouteError(root)?.let { error ->
+            val message = error.message
+            if (error.needsCaptcha) throw AllAnimeCaptchaRequiredException(currentRoute = true)
+            if (error.cryptoFailure) throw CurrentRouteCryptoError(message)
             if (message.contains("too many requests", true)) {
                 throw CurrentRouteRateLimit(message)
             }
@@ -281,7 +383,9 @@ internal class AllAnimeProvider(
         val data = root["data"] as? JsonObject ?: error("AllAnime returned no source data")
         val encrypted = data.string("tobeparsed")
         val decoded = if (!encrypted.isNullOrBlank()) {
-            AllAnimeCodec.decryptGcm(encrypted, key)
+            AllAnimeMkissaCrypto.decrypt(encrypted, material.key)
+                ?.let(json::parseToJsonElement)
+                ?: throw CurrentRouteCryptoError("AllAnime current response could not be decrypted")
         } else {
             data["episode"] ?: error("AllAnime current source payload missing")
         }
@@ -297,25 +401,6 @@ internal class AllAnimeProvider(
             subtitles = AllAnimeCodec.parseSubtitles(decoded),
             route = SourceRoute.CURRENT,
         )
-    }
-
-    private fun cryptoBootstrap(): CryptoBootstrap {
-        val bootstrapRequest = Request.Builder()
-            .url(protocol.bootstrapUrl)
-            .get()
-            .currentApiHeaders()
-            .build()
-        val bootstrapJson = json.parseToJsonElement(executeText(bootstrapRequest)).jsonObject
-        val bootstrap = CryptoBootstrap(
-            epoch = bootstrapJson.int("epoch") ?: error("AllAnime epoch missing"),
-            partB = bootstrapJson.string("partB") ?: error("AllAnime key half missing"),
-            switchAt = bootstrapJson.string("switchAt")?.toLongOrNull()
-                ?: (bootstrapJson["switchAt"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull(),
-        )
-        if (bootstrap.switchAt != null && System.currentTimeMillis() >= bootstrap.switchAt) {
-            error("AllAnime crypto bootstrap expired")
-        }
-        return bootstrap
     }
 
     private fun fetchLegacySourcePayload(showId: String, audio: String, episode: Int): SourcePayload {
@@ -337,6 +422,10 @@ internal class AllAnimeProvider(
         val root = json.parseToJsonElement(
             executeText(Request.Builder().url(url).get().allAnimeHeaders().build()),
         ) as? JsonObject ?: error("AllAnime returned invalid legacy source data")
+        currentRouteError(root)?.let { error ->
+            if (error.needsCaptcha) throw AllAnimeCaptchaRequiredException(currentRoute = false)
+            throw IllegalStateException("AllAnime legacy route error: ${error.message.take(240)}")
+        }
         val data = root["data"] as? JsonObject ?: error("AllAnime returned no legacy source data")
         val decoded = data.string("tobeparsed")?.takeIf(String::isNotBlank)?.let(AllAnimeCodec::decrypt)
             ?: data["episode"]
@@ -352,18 +441,41 @@ internal class AllAnimeProvider(
         val request = Request.Builder().url(url).get().playerHeaders().build()
         val root = runCatching { json.parseToJsonElement(executeText(request)) as? JsonObject }.getOrNull()
             ?: return ClockResult(emptyList(), emptyList())
-        val streams = (root["links"] as? JsonArray).orEmpty().mapNotNull { element ->
-            val link = element as? JsonObject ?: return@mapNotNull null
-            val streamUrl = link.string("link") ?: link.string("url") ?: return@mapNotNull null
-            val hls = link.boolean("hls") || streamUrl.contains(".m3u8", true) ||
-                streamUrl.contains("repackager.wixmp", true)
-            stream(
-                streamUrl,
-                if (hls) "hls" else "mp4",
-                qualityLabel(fallbackName, link.string("resolutionStr")),
-                audio,
-                protocol.playerReferer,
-            )
+        val streams = (root["links"] as? JsonArray).orEmpty().flatMap { element ->
+            val link = element as? JsonObject ?: return@flatMap emptyList()
+            buildList {
+                val streamUrl = link.string("link") ?: link.string("url")
+                if (!streamUrl.isNullOrBlank()) {
+                    val hls = link.boolean("hls") || streamUrl.contains(".m3u8", true) ||
+                        streamUrl.contains("repackager.wixmp", true)
+                    add(
+                        stream(
+                            streamUrl,
+                            if (hls) "hls" else "mp4",
+                            qualityLabel(fallbackName, link.string("resolutionStr")),
+                            audio,
+                            protocol.playerReferer,
+                        ),
+                    )
+                }
+                val portStreams = (((link["portData"] as? JsonObject)?.get("streams")) as? JsonArray).orEmpty()
+                portStreams.forEach { portElement ->
+                    val port = portElement as? JsonObject ?: return@forEach
+                    val portUrl = port.string("url") ?: return@forEach
+                    val format = port.string("format").orEmpty()
+                    if (format == "adaptive_hls" || portUrl.contains(".m3u8", true)) {
+                        add(
+                            stream(
+                                portUrl,
+                                "hls",
+                                qualityLabel(fallbackName, link.string("resolutionStr")),
+                                audio,
+                                protocol.playerReferer,
+                            ),
+                        )
+                    }
+                }
+            }
         }
         return ClockResult(streams, AllAnimeCodec.parseSubtitles(root))
     }
@@ -371,7 +483,7 @@ internal class AllAnimeProvider(
     internal fun isPlayable(item: StreamItem): Boolean = runCatching {
         val builder = Request.Builder()
             .url(item.url)
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", ALLANIME_USER_AGENT)
             .header("Referer", item.referer ?: protocol.playerReferer)
         if (!item.isHls) builder.header("Range", "bytes=0-1")
         client.newCall(builder.get().build()).execute().use { response ->
@@ -388,21 +500,27 @@ internal class AllAnimeProvider(
 
     private fun executeText(request: Request): String = client.newCall(request).execute().use { response ->
         val body = response.body?.string().orEmpty()
-        if (!response.isSuccessful) error("AllAnime HTTP ${response.code}")
+        if (!response.isSuccessful) {
+            throw AllAnimeHttpException(response.code, body.take(MAX_ERROR_BODY_CHARS))
+        }
         body
     }
 
     private fun Request.Builder.allAnimeHeaders(): Request.Builder = this
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", ALLANIME_USER_AGENT)
         .header("Referer", protocol.apiReferer)
         .header("Origin", protocol.apiOrigin)
         .header("Accept", "application/json, */*")
 
-    private fun Request.Builder.currentApiHeaders(): Request.Builder = allAnimeHeaders()
-        .header("x-build-id", protocol.buildId)
+    private fun Request.Builder.currentApiHeaders(buildId: String): Request.Builder = this
+        .header("User-Agent", ALLANIME_USER_AGENT)
+        .header("Origin", protocol.siteUrl)
+        .header("Referer", protocol.currentReferer)
+        .header("Accept", "application/json, */*")
+        .header("x-build-id", buildId)
 
     private fun Request.Builder.playerHeaders(): Request.Builder = this
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", ALLANIME_USER_AGENT)
         .header("Referer", protocol.playerReferer)
         .header("Accept", "application/json, */*")
 
@@ -425,11 +543,39 @@ internal class AllAnimeProvider(
         }
     }
 
-    private fun currentRouteError(root: JsonObject): String? =
-        (root["errors"] as? JsonArray)
-            ?.mapNotNull { (it as? JsonObject)?.string("message") }
-            ?.joinToString("; ")
-            ?.takeIf(String::isNotBlank)
+    private inline fun <T> retryCurrentRoute(label: String, block: () -> T): T {
+        return runCatching(block).getOrElse { firstFailure ->
+            // A deterministic protocol mismatch cannot heal on an immediate retry; let the
+            // route-scoped guard move directly to the still-independent legacy route.
+            if (
+                firstFailure is AllAnimeCaptchaRequiredException ||
+                firstFailure is CurrentRouteRateLimit ||
+                currentRouteGuard.isDeterministicProtocolFailure(firstFailure)
+            ) {
+                throw firstFailure
+            }
+            logFailure("$label failed; retrying once", firstFailure)
+            block()
+        }
+    }
+
+    private fun currentRouteError(root: JsonObject): RouteError? {
+        val errors = (root["errors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        if (errors.isEmpty()) return null
+        val messages = errors.mapNotNull { it.string("message") }
+        val codes = errors.flatMap { error ->
+            val extensions = error["extensions"] as? JsonObject
+            val exception = extensions?.get("exception") as? JsonObject
+            listOfNotNull(extensions?.string("code"), exception?.string("code"))
+        }
+        val text = (messages + codes).joinToString("; ").ifBlank { "Unknown AllAnime route error" }
+        return RouteError(
+            message = text,
+            needsCaptcha = (messages + codes).any { it.contains("NEED_CAPTCHA", true) },
+            cryptoFailure = codes.any { it.startsWith("AA_CRYPTO", true) } ||
+                messages.any { it.contains("AA_CRYPTO", true) },
+        )
+    }
 
     private fun stream(
         url: String,
@@ -456,9 +602,9 @@ internal class AllAnimeProvider(
     private fun JsonObject.boolean(name: String): Boolean = (this[name] as? JsonPrimitive)?.contentOrNull == "true"
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
+        private const val MAX_ERROR_BODY_CHARS = 512
+        private const val MAX_KEY_ATTEMPTS = 3
         private val MEDIA_URL = Regex("""\.(?:m3u8|mp4)(?:[?#]|$)""", RegexOption.IGNORE_CASE)
         private val HTML_PLAYER_URL = Regex("""(?:player|embed)[^/?]*\.html(?:[?#]|$)""", RegexOption.IGNORE_CASE)
         private const val SEARCH_QUERY =
@@ -492,10 +638,25 @@ internal object AllAnimeCodec {
     )
 
     fun decodeSourceUrl(value: String): String {
-        if (!value.startsWith("--")) return value
-        return value.drop(2).chunked(2).mapNotNull(hexMap::get).joinToString("")
-            .replace("/clock", "/clock.json")
+        val (payload, keyIndex) = when {
+            value.startsWith("--") -> value.drop(2) to 3
+            value.startsWith("#-") -> value.drop(2) to 2
+            value.startsWith("##") -> value.drop(2) to 1
+            value.startsWith("-#") -> value.drop(2) to 4
+            value.startsWith('#') -> value.drop(1) to 0
+            else -> return value
+        }
+        val bytes = runCatching { payload.chunked(2).map { it.toInt(16) } }.getOrNull() ?: return value
+        if (bytes.isEmpty() || payload.length % 2 != 0) return value
+        val mask = XOR_MASKS[keyIndex]
+        return String(CharArray(bytes.size) { index -> ((bytes[index] xor mask) and 0xff).toChar() })
+            .replace("/clock?", "/clock.json?")
+            .let { if (it.endsWith("/clock")) "$it.json" else it }
     }
+
+    fun isEncodedSource(value: String): Boolean =
+        value.startsWith("--") || value.startsWith("#-") || value.startsWith("##") ||
+            value.startsWith("-#") || value.startsWith('#')
 
     fun decrypt(encoded: String): JsonElement {
         val bytes = Base64Compat.decode(encoded)
@@ -627,4 +788,11 @@ internal object AllAnimeCodec {
     private val SUBTITLE_URL = Regex("\\.(?:vtt|srt|ass|ssa)(?:[?#]|$)", RegexOption.IGNORE_CASE)
     private const val KEY_SEED = "Xot36i3lK3:v1"
     private const val REQUEST_WINDOW_MS = 5 * 60 * 1000L
+    private val XOR_MASKS = arrayOf(
+        "allanimenews",
+        "1234567890123456789",
+        "1234567890123456789012345",
+        "s5feqxw21",
+        "feqx1",
+    ).map { key -> key.fold(0) { mask, character -> mask xor character.code } }.toIntArray()
 }

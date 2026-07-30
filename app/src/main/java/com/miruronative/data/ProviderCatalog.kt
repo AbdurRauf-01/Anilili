@@ -25,7 +25,7 @@ object ProviderCatalog {
 
     // Anivexa providers we query (reliable, self-hosted sources).
     val anivexaProviders = listOf(
-        "senshi", "anibd", "anikoto", "kaa", "allanime", "animekai", "reanime", "anizone", "animegg", "anineko", "2dhive",
+        "senshi", "anibd", "anidbapp", "anikoto", "kaa", "allanime", "animekai", "reanime", "anizone", "animegg", "anineko", "2dhive",
         "rareanimes",
         "hanime", "hentaihaven",
     )
@@ -103,6 +103,7 @@ object ProviderCatalog {
 
     fun label(provider: String): String = when (provider) {
         "anibd" -> "AniBD"
+        "anidbapp" -> "AniDB App"
         "2dhive" -> "2Dhive"
         "allanime" -> "AllAnime"
         "animekai" -> "AnimeKai"

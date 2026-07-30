@@ -21,7 +21,9 @@ import com.miruronative.data.reminder.AutomaticReleaseManager
 import com.miruronative.data.reminder.AniListNotificationPushManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.DiagnosticsPerformanceMonitor
 import com.miruronative.diagnostics.DiagnosticsSystemMonitor
+import com.miruronative.diagnostics.DiagnosticsUploadManager
 import com.miruronative.playback.EpisodeDownloads
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +56,7 @@ class MiruroApp : Application(), ImageLoaderFactory {
             return
         }
         DiagnosticsSystemMonitor.install(this)
+        DiagnosticsPerformanceMonitor.install(this)
         // Off the startup path deliberately. Opening Media3's download index scans the cache
         // directory and opens SQLite — measured at 211ms of the 440ms spent in onCreate on a TV
         // stick, with an empty cache, and it grows with the number of downloads. Nothing during
@@ -64,6 +67,7 @@ class MiruroApp : Application(), ImageLoaderFactory {
             // First, so a report from a device that "just closed" opens with the reason it closed.
             DiagnosticsLog.deviceProfile(this@MiruroApp)
             DiagnosticsLog.logPreviousExits(this@MiruroApp)
+            DiagnosticsUploadManager.schedulePending(this@MiruroApp)
             runCatching { EpisodeDownloads.initialize(this@MiruroApp) }
                 .onFailure { DiagnosticsLog.throwable("EpisodeDownloads initialization failed", it) }
         }

@@ -24,6 +24,8 @@ keystore.properties
 .vscode/
 
 # Generated or discarded project artifacts
+__pycache__/
+*.py[cod]
 graphify-out/
 tmp/
 worker/

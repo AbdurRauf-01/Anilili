@@ -8,12 +8,16 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.util.Base64
 import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -56,24 +60,26 @@ class AllAnimeProviderTest {
     }
 
     @Test
-    fun derivesCurrentEpochKeyAndSignsAuthenticatedRequest() {
-        val key = AllAnimeCodec.epochKey(
-            "AjhjboON3l/6/Y+WLrKww/kcIrmXCFBWUfdl7YHruaA=",
-            "cd7f14dbf40734836eb46eb14758e49ef9d81e61686d84d467b2e32063ef4af9",
+    fun derivesCurrentEpochKeyAndSignsLaneScopedAuthenticatedRequest() {
+        val mask = ByteArray(32) { it.toByte() }
+        val partB = ByteArray(32) { (it * 3).toByte() }
+        val key = AllAnimeMkissaCrypto.deriveKey(mask, partB)!!
+        val signed = AllAnimeMkissaCrypto.signRequest(
+            key = key,
+            epoch = 6_887,
+            buildId = "75",
+            queryHash = "query-hash",
+            lane = "k7",
+            nowMs = 1_785_436_123_456,
         )
-        assertEquals(
-            "cf4777b5778aeadc9449e12769ea545d00c43cd8ff65d482364586cde204f359",
-            key.joinToString("") { "%02x".format(it) },
-        )
-
-        val signed = AllAnimeCodec.signRequest(key, 4130, "44", "query-hash", 1_784_406_123_456)
-        val request = AllAnimeCodec.decryptGcm(signed, key).jsonObject
+        val request = Json.parseToJsonElement(AllAnimeMkissaCrypto.decrypt(signed, key)!!).jsonObject
 
         assertEquals("1", request.getValue("v").jsonPrimitive.content)
-        assertEquals("4130", request.getValue("epoch").jsonPrimitive.content)
-        assertEquals("44", request.getValue("buildId").jsonPrimitive.content)
+        assertEquals("6887", request.getValue("epoch").jsonPrimitive.content)
+        assertEquals("75", request.getValue("buildId").jsonPrimitive.content)
         assertEquals("query-hash", request.getValue("qh").jsonPrimitive.content)
-        assertEquals("1784406000000", request.getValue("ts").jsonPrimitive.content)
+        assertEquals("k7", request.getValue("k").jsonPrimitive.content)
+        assertEquals("1785435900000", request.getValue("ts").jsonPrimitive.content)
     }
 
     @Test
@@ -113,7 +119,9 @@ class AllAnimeProviderTest {
     fun separatesApiAndPlayerReferersInVersionedConfiguration() {
         val protocol = AllAnimeProtocolConfig.active
 
-        assertEquals("mkissa-build-44", protocol.version)
+        assertEquals("mkissa-dynamic-v1", protocol.version)
+        assertEquals("k7", protocol.contentLane)
+        assertTrue(protocol.buildId.isBlank())
         assertEquals("https://youtu-chan.com/", protocol.apiReferer)
         assertEquals("https://allanime.day/", protocol.playerReferer)
         assertFalse(protocol.apiReferer == protocol.playerReferer)
@@ -143,14 +151,135 @@ class AllAnimeProviderTest {
     }
 
     @Test
-    fun liveCatalogResolutionAndCurrentSourcesForJujutsuKaisenAndDeathNote() {
+    fun deterministicCurrentProtocolFailureFallsBackAndSkipsOnlyThatRoute() {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val origin = server.url("/").toString().removeSuffix("/")
+            val protocol = AllAnimeProtocolVersion(
+                version = "test",
+                buildId = "44",
+                currentSourcesHash = "current",
+                legacySourcesHash = "legacy",
+                cryptoMask = "00".repeat(32),
+                currentApiOrigin = origin,
+                legacyApi = "$origin/api",
+                apiReferer = "$origin/",
+                apiOrigin = origin,
+                playerReferer = "$origin/",
+            )
+            val legacyPayload =
+                """{"data":{"episode":{"sourceUrls":[{"sourceName":"embed","sourceUrl":"https://embed.test/player","type":"iframe","priority":1}]}}}"""
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(400)
+                    .setBody("""{"error":"missing_or_invalid_lane"}"""),
+            )
+            server.enqueue(MockResponse().setBody(legacyPayload))
+            server.enqueue(MockResponse().setBody(legacyPayload))
+            val provider = AllAnimeProvider(
+                OkHttpClient(),
+                Json { ignoreUnknownKeys = true },
+                protocol,
+            )
+
+            repeat(2) {
+                val result = provider.sourcesForShow("show", "sub", 1)
+                assertEquals(AllAnimeProvider.SourceRoute.LEGACY, provider.lastSourceRoute)
+                assertEquals("https://embed.test/player", result.streams.single().url)
+            }
+
+            val paths = (1..server.requestCount).map { server.takeRequest().path.orEmpty() }
+            assertEquals(3, paths.size)
+            assertTrue(paths.first().startsWith("/client-crypto/v1/bootstrap"))
+            assertTrue(paths.drop(1).all { it.startsWith("/api?") })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun currentCaptchaUsesVisibleSolutionOnceAndRetriesAsPostWithoutLegacyFallback() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val origin = server.url("/").toString().removeSuffix("/")
+            val partB = ByteArray(32) { (it + 1).toByte() }
+            val encodedPartB = Base64.getEncoder().encodeToString(partB)
+            val protocol = AllAnimeProtocolVersion(
+                version = "captcha-test",
+                buildId = "75",
+                currentSourcesHash = "current-hash",
+                legacySourcesHash = "legacy-hash",
+                cryptoMask = "00".repeat(32),
+                currentApiOrigin = origin,
+                legacyApi = "$origin/legacy",
+                apiReferer = "$origin/",
+                apiOrigin = origin,
+                playerReferer = "$origin/",
+                siteUrl = origin,
+            )
+            val decrypted =
+                """{"episode":{"sourceUrls":[{"sourceName":"embed","sourceUrl":"https://embed.test/player","type":"iframe","priority":1}]}}"""
+            val encrypted = encryptCurrentPayload(decrypted, partB)
+            server.enqueue(MockResponse().setBody("""{"epoch":6887,"partB":"$encodedPartB","k":"k7"}"""))
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"errors":[{"message":"NEED_CAPTCHA","extensions":{"code":"INTERNAL_SERVER_ERROR"}}],"data":{"episode":null}}""",
+                ),
+            )
+            server.enqueue(MockResponse().setBody("""{"data":{"tobeparsed":"$encrypted"}}"""))
+            var requestedUrl: String? = null
+            val provider = AllAnimeProvider(
+                client = OkHttpClient(),
+                json = Json { ignoreUnknownKeys = true },
+                protocol = protocol,
+                captchaRequester = { url ->
+                    requestedUrl = url
+                    AllAnimeCaptchaSolution("one-time-token", "turnstile")
+                },
+            )
+
+            val result = provider.sourcesForShowInteractive("show", "sub", 1)
+
+            assertEquals("$origin/captcha/turnstile", requestedUrl)
+            assertEquals(AllAnimeProvider.SourceRoute.CURRENT, provider.lastSourceRoute)
+            assertEquals("https://embed.test/player", result.streams.single().url)
+            val bootstrap = server.takeRequest()
+            val firstSource = server.takeRequest()
+            val retry = server.takeRequest()
+            assertTrue(bootstrap.path.orEmpty().contains("k=k7"))
+            assertNotNull(bootstrap.getHeader("x-aa-boot"))
+            assertEquals("GET", firstSource.method)
+            assertEquals("POST", retry.method)
+            assertEquals("/api", retry.path)
+            assertFalse(retry.path.orEmpty().contains("one-time-token"))
+            val retryBody = Json.parseToJsonElement(retry.body.readUtf8()).jsonObject
+            val extensions = retryBody.getValue("extensions").jsonObject
+            assertEquals("k7", extensions.getValue("k").jsonPrimitive.content)
+            assertEquals(
+                "one-time-token",
+                extensions.getValue("captcha").jsonObject.getValue("token").jsonPrimitive.content,
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun liveCatalogAndCurrentCaptchaHandshakeForJujutsuKaisenAndDeathNote() {
         assumeTrue(System.getenv("RUN_LIVE_ALLANIME_TESTS") == "1")
+        var requestedCaptchaUrl: String? = null
         val provider = AllAnimeProvider(
             OkHttpClient.Builder()
                 .followRedirects(true)
                 .callTimeout(Duration.ofSeconds(30))
                 .build(),
             Json { ignoreUnknownKeys = true },
+            captchaRequester = { url ->
+                requestedCaptchaUrl = url
+                null
+            },
         )
 
         val fixtures = listOf(
@@ -180,19 +309,20 @@ class AllAnimeProviderTest {
             assertEquals("${fixture.media.title.preferred} Sub count", fixture.subCount, availability.sub.size)
             assertEquals("${fixture.media.title.preferred} Dub count", fixture.dubCount, availability.dub.size)
 
-            listOf("sub", "dub").forEach { audio ->
-                val sources = provider.sources(
-                    fixture.media,
-                    audio,
-                    episode = 1,
-                    allowLegacyFallback = false,
-                )
-                assertEquals(AllAnimeProvider.SourceRoute.CURRENT, provider.lastSourceRoute)
-                assertTrue("${fixture.media.title.preferred} $audio has no sources", sources.streams.isNotEmpty())
-                assertTrue(sources.streams.all { it.audio == audio })
-                assertTrue(sources.streams.all { it.referer == AllAnimeProtocolConfig.active.playerReferer })
-                assertNotNull(sources.streams.firstOrNull())
+            requestedCaptchaUrl = null
+            val failure = runBlocking {
+                runCatching {
+                    provider.sourcesInteractive(fixture.media, audio = "sub", episode = 1)
+                }.exceptionOrNull()
             }
+            assertEquals(
+                "${AllAnimeProtocolConfig.active.currentApiOrigin}/captcha/turnstile",
+                requestedCaptchaUrl,
+            )
+            assertTrue(
+                "${fixture.media.title.preferred} did not reach the current CAPTCHA handshake",
+                failure?.message.orEmpty().contains("cancelled", ignoreCase = true),
+            )
         }
     }
 
@@ -201,4 +331,13 @@ class AllAnimeProviderTest {
         val subCount: Int,
         val dubCount: Int,
     )
+
+    private fun encryptCurrentPayload(plaintext: String, key: ByteArray): String {
+        val iv = ByteArray(12) { (it + 5).toByte() }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        return Base64.getEncoder().encodeToString(
+            byteArrayOf(1) + iv + cipher.doFinal(plaintext.toByteArray(StandardCharsets.UTF_8)),
+        )
+    }
 }

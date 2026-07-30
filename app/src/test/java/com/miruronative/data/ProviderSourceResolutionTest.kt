@@ -5,6 +5,7 @@ import com.miruronative.data.model.StreamItem
 import java.io.IOException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -72,6 +73,26 @@ class ProviderSourceResolutionTest {
 
         assertEquals(listOf("kaa"), attempts)
         assertEquals("kaa", result.resolved?.provider)
+    }
+
+    @Test
+    fun `an explicitly interactive provider can receive a longer timeout`() = runBlocking {
+        val timedOut = mutableListOf<String>()
+
+        val result = resolveProviderCandidates(
+            candidates = listOf(candidate("allanime"), candidate("kaa")),
+            excludedProviders = emptySet(),
+            maxAttempts = 2,
+            attemptTimeoutMs = 20L,
+            attemptTimeoutMsFor = { provider -> if (provider == "allanime") 200L else 20L },
+            onTimeout = timedOut::add,
+        ) { candidate ->
+            if (candidate.provider == "allanime") delay(60L)
+            playableSources(candidate.provider)
+        }
+
+        assertTrue(timedOut.isEmpty())
+        assertEquals("allanime", result.resolved?.provider)
     }
 
     @Test

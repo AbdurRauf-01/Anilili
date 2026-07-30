@@ -115,6 +115,7 @@ internal suspend fun resolveProviderCandidates(
     excludedProviders: Set<String>,
     maxAttempts: Int,
     attemptTimeoutMs: Long,
+    attemptTimeoutMsFor: (String) -> Long = { attemptTimeoutMs },
     onAttempt: (String) -> Unit = {},
     onFailure: (String, Exception) -> Unit = { _, _ -> },
     onTimeout: (String) -> Unit = {},
@@ -131,9 +132,11 @@ internal suspend fun resolveProviderCandidates(
         if (candidate.provider in excludedProviders) continue
         attempts++
         onAttempt(candidate.provider)
+        val providerTimeoutMs = attemptTimeoutMsFor(candidate.provider)
+        require(providerTimeoutMs > 0L) { "provider timeout must be positive" }
 
         val result = try {
-            withTimeoutOrNull(attemptTimeoutMs) { load(candidate) }
+            withTimeoutOrNull(providerTimeoutMs) { load(candidate) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -743,8 +746,10 @@ class MiruroRepository(
         provider: String,
         category: Category,
         anilistId: Int,
+        allowInteractiveChallenges: Boolean = true,
     ): SourcesResult = when (ProviderCatalog.sourceOf(provider)) {
-        ProviderCatalog.Source.ANIVEXA -> anivexa.getSources(pipeId, animeInfo(anilistId))
+        ProviderCatalog.Source.ANIVEXA ->
+            anivexa.getSources(pipeId, animeInfo(anilistId), allowInteractiveChallenges)
         ProviderCatalog.Source.MIRURO -> pipe.getSources(pipeId, provider, category, anilistId)
     }
 
@@ -771,7 +776,9 @@ class MiruroRepository(
         episodes: EpisodesResult,
         excludedProviders: Set<String> = emptySet(),
         maxAttempts: Int = 5,
+        allowInteractiveChallenges: Boolean = true,
     ): SourceResolution {
+        val interactiveAllAnime = allowInteractiveChallenges && preferred.equals("allanime", ignoreCase = true)
         val ordered = providerAttemptOrder(
             preferred = preferred,
             providerNames = episodes.providerNames,
@@ -789,10 +796,22 @@ class MiruroRepository(
             excludedProviders = excludedProviders,
             maxAttempts = maxAttempts,
             attemptTimeoutMs = PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS,
+            attemptTimeoutMsFor = { provider ->
+                if (interactiveAllAnime && provider == "allanime") {
+                    ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
+                } else {
+                    PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
+                }
+            },
             onAttempt = { provider ->
+                val timeoutMs = if (interactiveAllAnime && provider == "allanime") {
+                    ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
+                } else {
+                    PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
+                }
                 DiagnosticsLog.event(
                     "Source resolve attempt provider=$provider id=$anilistId episode=$number " +
-                        "timeoutMs=$PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS",
+                        "timeoutMs=$timeoutMs interactiveChallenge=${provider == "allanime" && interactiveAllAnime}",
                 )
             },
             onFailure = { provider, error ->
@@ -802,9 +821,14 @@ class MiruroRepository(
                 )
             },
             onTimeout = { provider ->
+                val timeoutMs = if (interactiveAllAnime && provider == "allanime") {
+                    ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
+                } else {
+                    PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
+                }
                 DiagnosticsLog.event(
                     "Source resolve timeout provider=$provider id=$anilistId episode=$number " +
-                        "afterMs=$PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS",
+                        "afterMs=$timeoutMs",
                 )
             },
             onEmpty = { provider ->
@@ -813,7 +837,13 @@ class MiruroRepository(
                 )
             },
         ) { candidate ->
-            sources(candidate.pipeId, candidate.provider, category, anilistId)
+            sources(
+                candidate.pipeId,
+                candidate.provider,
+                category,
+                anilistId,
+                allowInteractiveChallenges = interactiveAllAnime && candidate.provider == "allanime",
+            )
         }
         return SourceResolution(
             resolved = resolution.resolved?.let { ResolvedSources(it.sources, it.provider) },
@@ -878,6 +908,7 @@ class MiruroRepository(
         const val FILLER_FETCH_TIMEOUT_MS = 3_500L
         const val FAST_CATALOG_PROVIDER_TIMEOUT_MS = 6_000L
         const val PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS = 8_000L
+        const val ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS = 120_000L
         const val INFO_TTL = 24L * 60 * 60 * 1000
         const val OPTIONS_TTL = 7L * 24 * 60 * 60 * 1000
         const val SERIES_KEY_PREFIX = "series:v1:"

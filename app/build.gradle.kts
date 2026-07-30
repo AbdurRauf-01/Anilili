@@ -18,8 +18,11 @@ val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
             isIgnoreExitValue = true
         }.standardOutput.asText.get().trim()
     }.getOrDefault("unknown").ifBlank { "unknown" }
-val appVersionCode = 51
-val appVersionName = "0.1.50"
+val appVersionCode = 52
+val appVersionName = "0.1.51"
+val diagnosticsUploadUrl = providers.gradleProperty("diagnosticsUploadUrl").orNull
+    ?: providers.environmentVariable("DIAGNOSTICS_UPLOAD_URL").orNull
+    ?: ""
 
 val keystoreProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -39,6 +42,7 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
         buildConfigField("String", "GIT_SHA", "\"$diagnosticBuildSha\"")
+        buildConfigField("String", "DIAGNOSTICS_UPLOAD_URL", "\"$diagnosticsUploadUrl\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -181,7 +185,6 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.tvprovider)
-    implementation(libs.zxing.core)
     implementation(libs.androidx.profileinstaller)
     baselineProfile(project(":benchmark"))
     testImplementation(libs.junit)

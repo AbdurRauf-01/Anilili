@@ -21,6 +21,16 @@ import java.util.concurrent.atomic.AtomicLong
 data class RawPipeResponse(val ok: Boolean, val status: Int, val obf: String?, val body: String?, val error: String?)
 
 /**
+ * Tries the most recently healthy origin first, then wraps through every remaining mirror once.
+ * An unknown persisted value falls back to the configured order.
+ */
+internal fun orderedPipeOrigins(origins: List<String>, lastWorkingOrigin: String): List<String> {
+    require(origins.isNotEmpty()) { "origins must not be empty" }
+    val startIndex = origins.indexOf(lastWorkingOrigin).takeIf { it >= 0 } ?: 0
+    return List(origins.size) { offset -> origins[(startIndex + offset) % origins.size] }
+}
+
+/**
  * Routes pipe requests through a real (hidden) WebView. Cloudflare fingerprints the HTTP client,
  * so a plain OkHttp call gets a 403 WAF block; a same-origin `fetch()` from inside a loaded
  * miruro.to page rides the browser's TLS fingerprint + `cf_clearance` cookie and is allowed.
@@ -42,6 +52,7 @@ object PipeBridge {
         "https://www.miruro.to",
         "https://www.miruro.tv",
         "https://www.miruro.bz",
+        "https://www.miruro.ru",
     )
 
     private val main = Handler(Looper.getMainLooper())
@@ -82,11 +93,12 @@ object PipeBridge {
 
     @Volatile private var webView: WebView? = null
     @Volatile private var ready = CompletableDeferred<Boolean>()
+    @Volatile private var originAttempts = ORIGINS
     @Volatile private var originIndex = 0
     private val pending = ConcurrentHashMap<String, CompletableDeferred<String>>()
     private val counter = AtomicLong(0)
 
-    private val activeOrigin: String get() = ORIGINS[originIndex]
+    private val activeOrigin: String get() = originAttempts[originIndex]
 
     private val mirrorWatchdog = Runnable {
         DiagnosticsLog.event("PipeBridge mirror timed out after ${MIRROR_TIMEOUT_MS}ms origin=$activeOrigin")
@@ -102,7 +114,7 @@ object PipeBridge {
     private fun advanceMirror() {
         main.removeCallbacks(mirrorWatchdog)
         if (ready.isCompleted) return
-        if (originIndex < ORIGINS.lastIndex) {
+        if (originIndex < originAttempts.lastIndex) {
             originIndex++
             DiagnosticsLog.event("PipeBridge trying mirror $activeOrigin")
             armMirrorWatchdog()
@@ -198,9 +210,10 @@ object PipeBridge {
                 return true
             }
         }
-        // Start from whichever mirror last answered on this network, so a user whose ISP blocks
-        // the first ones pays the failover walk once rather than on every launch.
-        originIndex = ORIGINS.indexOf(SettingsStore.lastWorkingPipeOrigin.value).coerceAtLeast(0)
+        // Start from whichever mirror last answered on this network, then wrap around the list so
+        // a stale last-working value cannot make earlier mirrors unreachable.
+        originAttempts = orderedPipeOrigins(ORIGINS, SettingsStore.lastWorkingPipeOrigin.value)
+        originIndex = 0
         DiagnosticsLog.event("PipeBridge load origin=$activeOrigin")
         armMirrorWatchdog()
         wv.loadUrl("$activeOrigin/")

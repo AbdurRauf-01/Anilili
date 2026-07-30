@@ -140,10 +140,11 @@ class WatchSourcePolicyTest {
                 TvPlayerControl.FORWARD,
                 TvPlayerControl.NEXT,
                 TvPlayerControl.MUTE,
+                TvPlayerControl.CAPTIONS,
                 TvPlayerControl.SETTINGS,
                 TvPlayerControl.FULLSCREEN,
             ),
-            tvPlayerControlOrder(hasSettings = true, hasFullscreen = true),
+            tvPlayerControlOrder(hasCaptions = true, hasSettings = true, hasFullscreen = true),
         )
     }
 

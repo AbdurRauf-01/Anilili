@@ -12,6 +12,11 @@ class AniListPolicyTest {
     }
 
     @Test
+    fun `new releasing entry with unknown total starts current`() {
+        assertEquals(MediaListProgressUpdate(1, "CURRENT"), planMediaListProgressUpdate(null, 1, null))
+    }
+
+    @Test
     fun `last episode completes current entry`() {
         val current = MediaListProgressSnapshot(7, "CURRENT", 11)
         assertEquals(MediaListProgressUpdate(12, "COMPLETED"), planMediaListProgressUpdate(current, 12, 12))

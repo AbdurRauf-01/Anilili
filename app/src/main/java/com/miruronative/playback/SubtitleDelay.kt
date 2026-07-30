@@ -7,6 +7,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ForwardingRenderer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.text.TextOutput
+import com.miruronative.data.settings.MAX_CAPTION_DELAY_MS
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,7 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * volatile field beside the flow the UI collects.
  */
 object SubtitleDelay {
-    const val MAX_MS = 30_000L
+    const val MAX_MS = MAX_CAPTION_DELAY_MS
     const val STEP_MS = 250L
 
     private val _delayMs = MutableStateFlow(0L)
@@ -51,6 +52,18 @@ object SubtitleDelay {
 
     fun reset() = set(0L)
 }
+
+internal data class SubtitleDelaySeed(
+    val delayMs: Long,
+    val automatic: Boolean,
+)
+
+/** A saved series delay wins over the provider's per-episode measurement. */
+internal fun subtitleDelaySeed(providerDelayMs: Long, persistentDelayMs: Long?): SubtitleDelaySeed =
+    SubtitleDelaySeed(
+        delayMs = persistentDelayMs ?: providerDelayMs,
+        automatic = persistentDelayMs == null,
+    )
 
 /**
  * Shifts the position handed to the text renderer, so subtitles can be nudged against the video

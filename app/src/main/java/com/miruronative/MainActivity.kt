@@ -111,6 +111,7 @@ import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.CrashReportDialog
 import com.miruronative.diagnostics.CrashReporter
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.DiagnosticsJankMonitor
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.settings.MenuLanguage
 import com.miruronative.data.update.UpdateManager
@@ -161,6 +162,7 @@ class MainActivity : FragmentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        DiagnosticsJankMonitor.install(this)
         window.decorView.setBackgroundColor(Color.rgb(5, 5, 6))
         DiagnosticsLog.snapshot(this, "MainActivity.afterSuper")
         DiagnosticsLog.event(

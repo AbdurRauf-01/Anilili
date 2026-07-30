@@ -13,10 +13,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -59,7 +61,9 @@ internal enum class TvPlayerControl {
     FORWARD,
     NEXT,
     EPISODES,
+    MY_LIST,
     MUTE,
+    CAPTIONS,
     SETTINGS,
     FULLSCREEN,
 }
@@ -71,6 +75,8 @@ internal enum class TvPlayerControl {
  */
 internal fun tvPlayerControlOrder(
     hasEpisodes: Boolean = false,
+    hasList: Boolean = false,
+    hasCaptions: Boolean = false,
     hasSettings: Boolean = false,
     hasFullscreen: Boolean = false,
 ): List<TvPlayerControl> = buildList {
@@ -80,7 +86,9 @@ internal fun tvPlayerControlOrder(
     add(TvPlayerControl.FORWARD)
     add(TvPlayerControl.NEXT)
     if (hasEpisodes) add(TvPlayerControl.EPISODES)
+    if (hasList) add(TvPlayerControl.MY_LIST)
     add(TvPlayerControl.MUTE)
+    if (hasCaptions) add(TvPlayerControl.CAPTIONS)
     if (hasSettings) add(TvPlayerControl.SETTINGS)
     if (hasFullscreen) add(TvPlayerControl.FULLSCREEN)
 }
@@ -119,6 +127,8 @@ internal fun TvPlayerControls(
     onNext: () -> Unit,
     onToggleMute: () -> Unit,
     onEpisodes: (() -> Unit)? = null,
+    onAddToList: (() -> Unit)? = null,
+    onCaptions: (() -> Unit)? = null,
     onSettings: (() -> Unit)? = null,
     onFullscreen: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -246,6 +256,11 @@ internal fun TvPlayerControls(
                         Icon(Icons.AutoMirrored.Filled.ViewList, contentDescription = null)
                     }
                 }
+                onAddToList?.let { callback ->
+                    TvControlButton("Add to My List", onFocused = { focusedLabel = it }, onClick = callback) {
+                        Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = null)
+                    }
+                }
                 TvControlButton(
                     if (isMuted) "Unmute" else "Mute",
                     onFocused = { focusedLabel = it },
@@ -255,6 +270,11 @@ internal fun TvPlayerControls(
                         if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = null,
                     )
+                }
+                onCaptions?.let { callback ->
+                    TvControlButton("Captions", onFocused = { focusedLabel = it }, onClick = callback) {
+                        Icon(Icons.Default.ClosedCaption, contentDescription = null)
+                    }
                 }
                 onSettings?.let { callback ->
                     TvControlButton("Playback settings", onFocused = { focusedLabel = it }, onClick = callback) {

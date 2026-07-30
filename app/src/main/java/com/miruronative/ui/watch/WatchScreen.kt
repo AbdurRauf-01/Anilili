@@ -132,6 +132,7 @@ import com.miruronative.playback.EpisodeDownloadUi
 import com.miruronative.playback.EpisodeExport
 import com.miruronative.playback.episodeDownloadBadges
 import com.miruronative.ui.components.DownloadCoverBadge
+import com.miruronative.ui.components.AnimeListStatusDialog
 import com.miruronative.playback.OfflineEpisode
 import com.miruronative.playback.offlineEpisodes
 import com.miruronative.playback.PlaybackService
@@ -408,6 +409,7 @@ private fun WatchContent(
 ) {
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
+    var listStatusDialogVisible by remember(data.anilistId) { mutableStateOf(false) }
     val downloads by EpisodeDownloads.downloads(context).collectAsState()
     val exportedEpisodes by EpisodeExport.exported(context).collectAsState()
     val preparingIds by EpisodeDownloads.preparingIds.collectAsState()
@@ -429,6 +431,16 @@ private fun WatchContent(
         data.current.pipeId,
         data.provider,
     ) { mutableStateOf(false) }
+
+    if (listStatusDialogVisible) {
+        AnimeListStatusDialog(
+            anilistId = data.anilistId,
+            title = data.seriesTitle,
+            episodeLabel = "Episode ${data.current.displayNumber}" +
+                (data.current.distinctTitle?.let { ": $it" } ?: ""),
+            onDismiss = { listStatusDialogVisible = false },
+        )
+    }
     var selectedDownloadQuality by remember { mutableStateOf(defaultDownloadQuality) }
     // 1 means just the episode on screen; anything larger is a bounded batch.
     var downloadBatchSize by remember { mutableIntStateOf(1) }
@@ -781,6 +793,7 @@ private fun WatchContent(
                                 episodeTitle = data.current.distinctTitle
                                     ?: "Episode ${data.current.displayNumber}",
                                 onSelectEpisode = onSelectEpisode,
+                                onAddToList = { listStatusDialogVisible = true },
                             )
                             // Embed players often use CSS "web fullscreen" that never reaches the
                             // WebView fullscreen callback, so the app provides its own toggle. On
@@ -833,6 +846,7 @@ private fun WatchContent(
                         episodes = data.episodes,
                         currentIndex = data.currentIndex,
                         onSelectEpisode = onSelectEpisode,
+                        onAddToList = { listStatusDialogVisible = true },
                     )
                 }
             }

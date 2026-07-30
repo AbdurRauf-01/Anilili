@@ -227,6 +227,7 @@ object ReleaseSyncScheduler {
 
     fun schedule(context: Context) {
         val request = PeriodicWorkRequestBuilder<ReleaseSyncWorker>(3, TimeUnit.HOURS)
+            .addTag("release-sync")
             .setConstraints(network)
             .build()
         WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
@@ -239,6 +240,7 @@ object ReleaseSyncScheduler {
 
     fun runNow(context: Context) {
         val request = OneTimeWorkRequestBuilder<ReleaseSyncWorker>()
+            .addTag("release-sync")
             .setConstraints(network)
             .build()
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(

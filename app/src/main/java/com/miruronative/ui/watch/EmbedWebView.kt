@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -134,6 +135,7 @@ fun EmbedWebView(
     seriesTitle: String = "",
     episodeTitle: String = "",
     onSelectEpisode: ((Int) -> Unit)? = null,
+    onAddToList: (() -> Unit)? = null,
 ) {
     val device = LocalAppDeviceProfile.current
     val playerGestures by SettingsStore.playerGestures.collectAsState()
@@ -151,6 +153,7 @@ fun EmbedWebView(
     val activeQualityStream = embedQualityStreams.firstOrNull { it.url == activeUrl }
     val activeReferer = activeQualityStream?.referer ?: referer
     var captionAppearanceVisible by remember(url) { mutableStateOf(false) }
+    var captionsSheetVisible by remember(url) { mutableStateOf(false) }
     var settingsSheetVisible by remember(url) { mutableStateOf(false) }
     var playbackSpeed by remember(url) { mutableFloatStateOf(1f) }
     // The speed to restore once a hold-for-2x gesture ends (the user's chosen playback speed).
@@ -383,6 +386,7 @@ fun EmbedWebView(
         focusPlayerOnStart,
         screenReaderActive,
         settingsSheetVisible,
+        captionsSheetVisible,
         captionAppearanceVisible,
     ) {
         if (!focusPlayerOnStart) {
@@ -395,7 +399,7 @@ fun EmbedWebView(
         if (screenReaderActive) return@LaunchedEffect
         // While the settings panel or caption dialog is up, hiding the row would hand focus
         // back to the WebView and take the remote away from the panel.
-        if (settingsSheetVisible || captionAppearanceVisible) return@LaunchedEffect
+        if (settingsSheetVisible || captionsSheetVisible || captionAppearanceVisible) return@LaunchedEffect
         delay(8_000)
         tvControlsVisible = false
         webView?.requestFocus()
@@ -946,7 +950,9 @@ fun EmbedWebView(
                     positionMs = targetMs // the poll confirms next tick; without this the thumb snaps back first
                     touchControlsInteraction++
                 },
+                onCaptions = { captionsSheetVisible = true },
                 onSettings = { settingsSheetVisible = true },
+                onAddToList = onAddToList,
                 onEpisodes = if (episodes.isNotEmpty() && onSelectEpisode != null) {
                     {
                         episodeDrawerExpanded = true
@@ -984,17 +990,23 @@ fun EmbedWebView(
                         },
                     )
                 },
-                onCaptionAppearance = if (webPlaybackAvailable) {
-                    {
-                        if (device.isTv) settingsSheetVisible = false
-                        captionAppearanceVisible = true
-                    }
-                } else {
-                    null
-                },
                 autoSkip = autoSkipIntroOutro,
                 onAutoSkipChange = SettingsStore::setAutoSkipIntroOutro,
                 skipTimingStatus = skipTimingStatus,
+            )
+        }
+
+        if (captionsSheetVisible) {
+            PlayerCaptionsSheet(
+                onDismiss = {
+                    captionsSheetVisible = false
+                    restoreTvControlsFocus()
+                },
+                emptyTrackMessage = "Subtitle track selection is controlled by this video server.",
+                onCaptionAppearance = {
+                    captionsSheetVisible = false
+                    captionAppearanceVisible = true
+                },
             )
         }
 
@@ -1013,6 +1025,16 @@ fun EmbedWebView(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                onAddToList?.let { openList ->
+                    PlayerControlIconButton(
+                        "Add to My List",
+                        Icons.AutoMirrored.Filled.PlaylistAdd,
+                        onClick = {
+                            openList()
+                            fallbackInteraction++
+                        },
+                    )
+                }
                 PlayerControlIconButton(
                     "Previous episode",
                     Icons.Default.SkipPrevious,
@@ -1094,11 +1116,19 @@ fun EmbedWebView(
                     }
                 },
                 onSettings = {
-                    // The full settings panel (quality, speed, captions, autoplay, auto-skip,
+                    // The full playback settings panel (quality, speed, autoplay, auto-skip,
                     // volume) with the TV side-panel presentation — the old quality-or-speed
                     // dialog left most settings unreachable from a remote.
                     DiagnosticsLog.event("EmbedWebView TV control settings")
                     settingsSheetVisible = true
+                },
+                onCaptions = if (webPlaybackAvailable) {
+                    {
+                        DiagnosticsLog.event("EmbedWebView TV control captions")
+                        captionsSheetVisible = true
+                    }
+                } else {
+                    null
                 },
                 onEpisodes = if (episodes.isNotEmpty() && onSelectEpisode != null) {
                     {
@@ -1106,6 +1136,12 @@ fun EmbedWebView(
                         episodeDrawerExpanded = true
                     }
                 } else null,
+                onAddToList = onAddToList?.let { openList ->
+                    {
+                        DiagnosticsLog.event("EmbedWebView TV control myList")
+                        openList()
+                    }
+                },
                 onFullscreen = onToggleFullscreen,
                 modifier = Modifier.fillMaxSize(),
             )

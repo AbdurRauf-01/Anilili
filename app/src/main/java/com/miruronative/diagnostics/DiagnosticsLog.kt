@@ -3,88 +3,177 @@ package com.miruronative.diagnostics
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
+import android.app.ApplicationExitInfo
+import android.app.ApplicationStartInfo
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
+import android.hardware.display.DisplayManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.view.Choreographer
+import android.view.Display
 import android.view.View
 import android.view.ViewTreeObserver
 import android.webkit.WebView
 import androidx.core.content.FileProvider
+import androidx.work.WorkManager
 import com.miruronative.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.ArrayDeque
 import java.util.Locale
+import java.util.TimeZone
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.function.Consumer
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
-/**
- * Small rolling diagnostic log for user-reported "black screen" and startup hangs where no crash
- * is thrown. Keep this local-only: users explicitly share a snapshot from Settings.
- */
+/** Local-first, structured diagnostics for sideloaded phones and Android/Fire TV devices. */
 object DiagnosticsLog {
     private const val LOG_DIR = "diagnostics"
-    private const val LOG_FILE = "diagnostics.txt"
-    private const val SHARE_FILE = "Anilili-diagnostics.txt"
-    private const val MAX_BYTES = 900_000L
-    private const val TRIM_TO_BYTES = 650_000
+    private const val SHARE_FILE_PREFIX = "Anilili-diagnostics"
+    private const val CACHED_REPORT_MAX_AGE_MS = 24L * 60 * 60 * 1_000
+    private const val EVENT_FILE_BYTES = 1_000_000L
+    private const val MAX_EXIT_TRACE_BYTES = 1_500_000L
+    private const val PROCESS_STATE_MIN_INTERVAL_MS = 5_000L
+    private const val MAX_RECENT_SUMMARY_EVENTS = 160
+    private val categorySanitizer = Regex("[^A-Za-z0-9_-]")
+    private val eventNameSanitizer = Regex("[^A-Za-z0-9_.-]")
+    private val processSuffixSanitizer = Regex("[^A-Za-z0-9_.-]")
 
-    private val lock = Any()
     @Volatile private var appContext: Context? = null
-    @Volatile private var file: File? = null
+    @Volatile private var store: DiagnosticFileStore? = null
+    @Volatile private var processName = "unknown"
     @Volatile private var lifecycleCallbacksInstalled = false
     @Volatile private var watchdogStarted = false
     @Volatile private var lastMainBlockLogAt = 0L
+    @Volatile private var lastProcessStateAt = 0L
+
+    private val sessionId = UUID.randomUUID().toString()
+    private val processStartedElapsedMs = SystemClock.elapsedRealtime()
+    private val sequence = AtomicLong(0)
+    private val shareInProgress = AtomicBoolean(false)
 
     fun init(context: Context) {
-        appContext = context.applicationContext
-        file = File(context.filesDir, LOG_DIR).resolve(LOG_FILE)
+        val app = context.applicationContext
+        appContext = app
+        processName = currentProcessName(app) ?: app.packageName
+        if (store == null) {
+            val processSuffix = processName
+                .removePrefix(app.packageName)
+                .trimStart(':')
+                .ifBlank { "main" }
+                .replace(processSuffixSanitizer, "_")
+            store = DiagnosticFileStore(
+                directory = diagnosticsDirectory(app),
+                fileStem = "events-$processSuffix",
+                maxBytes = EVENT_FILE_BYTES,
+            )
+        }
         event(
-            "process start app=${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) " +
-                "${BuildConfig.BUILD_TYPE}; device=${Build.MANUFACTURER} ${Build.MODEL}; " +
-                "android=${Build.VERSION.RELEASE} sdk=${Build.VERSION.SDK_INT}",
+            category = "app",
+            name = "process.start",
+            attributes = mapOf(
+                "appVersion" to BuildConfig.VERSION_NAME,
+                "versionCode" to BuildConfig.VERSION_CODE,
+                "buildType" to BuildConfig.BUILD_TYPE,
+                "buildSha" to BuildConfig.GIT_SHA,
+                "device" to "${Build.MANUFACTURER} ${Build.MODEL}",
+                "android" to Build.VERSION.RELEASE,
+                "sdk" to Build.VERSION.SDK_INT,
+            ),
         )
     }
+
+    fun event(message: String) {
+        record(
+            level = "INFO",
+            category = inferredCategory(message),
+            name = inferredName(message),
+            message = message,
+        )
+        maybeUpdateProcessState(message)
+    }
+
+    fun event(
+        category: String,
+        name: String,
+        attributes: Map<String, Any?> = emptyMap(),
+        message: String? = null,
+    ) {
+        record(
+            level = "INFO",
+            category = category,
+            name = name,
+            message = message,
+            attributes = attributes.mapValues { (_, value) -> value?.toString() ?: "null" },
+        )
+    }
+
+    fun throwable(message: String, throwable: Throwable) {
+        recordThrowable("ERROR", message, throwable, blocking = false)
+    }
+
+    /** Synchronous and fs-backed so the final event survives process teardown. */
+    fun fatal(message: String, throwable: Throwable) {
+        recordThrowable("FATAL", message, throwable, blocking = true)
+    }
+
+    fun threadStack(message: String, thread: Thread) {
+        record(
+            level = "WARN",
+            category = "thread",
+            name = "thread.stack",
+            message = message,
+            attributes = mapOf(
+                "targetThread" to thread.name,
+                "stackTrace" to stackTrace(thread),
+            ),
+        )
+    }
+
+    fun flush(timeoutMs: Long = 2_000): Boolean = store?.flush(timeoutMs) ?: true
 
     fun installLifecycleCallbacks(application: Application) {
         if (lifecycleCallbacksInstalled) return
         lifecycleCallbacksInstalled = true
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                event("lifecycle ${activity.javaClass.simpleName}.created saved=${savedInstanceState != null}")
-            }
+            override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) =
+                lifecycle(activity, "created", mapOf("savedState" to (savedInstanceState != null)))
 
-            override fun onActivityStarted(activity: Activity) {
-                event("lifecycle ${activity.javaClass.simpleName}.started")
-            }
+            override fun onActivityStarted(activity: Activity) = lifecycle(activity, "started")
+            override fun onActivityResumed(activity: Activity) = lifecycle(activity, "resumed")
+            override fun onActivityPaused(activity: Activity) = lifecycle(activity, "paused")
+            override fun onActivityStopped(activity: Activity) = lifecycle(activity, "stopped")
 
-            override fun onActivityResumed(activity: Activity) {
-                event("lifecycle ${activity.javaClass.simpleName}.resumed")
-            }
+            override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) =
+                lifecycle(activity, "save_instance_state")
 
-            override fun onActivityPaused(activity: Activity) {
-                event("lifecycle ${activity.javaClass.simpleName}.paused")
-            }
-
-            override fun onActivityStopped(activity: Activity) {
-                event("lifecycle ${activity.javaClass.simpleName}.stopped")
-            }
-
-            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
-                event("lifecycle ${activity.javaClass.simpleName}.saveInstanceState")
-            }
-
-            override fun onActivityDestroyed(activity: Activity) {
-                event("lifecycle ${activity.javaClass.simpleName}.destroyed finishing=${activity.isFinishing}")
-            }
+            override fun onActivityDestroyed(activity: Activity) = lifecycle(
+                activity,
+                "destroyed",
+                mapOf("finishing" to activity.isFinishing),
+            )
         })
     }
 
@@ -100,7 +189,7 @@ object DiagnosticsLog {
                     responded.set(true)
                     val delayMs = SystemClock.elapsedRealtime() - postedAt
                     if (delayMs > 5_000) {
-                        event("main thread recovered after ${delayMs}ms")
+                        event("thread", "main.recovered", mapOf("blockedMs" to delayMs))
                     }
                 }
                 runCatching { Thread.sleep(6_000) }
@@ -108,13 +197,16 @@ object DiagnosticsLog {
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastMainBlockLogAt > 15_000) {
                         lastMainBlockLogAt = now
-                        append(
-                            buildString {
-                                append(timestamp())
-                                append("  MAIN THREAD BLOCKED >6000ms\n")
-                                append(stackTrace(Looper.getMainLooper().thread))
-                                append('\n')
-                            },
+                        val mainThread = Looper.getMainLooper().thread
+                        record(
+                            level = "WARN",
+                            category = "thread",
+                            name = "main.blocked",
+                            attributes = mapOf(
+                                "blockedMoreThanMs" to "6000",
+                                "mainStack" to stackTrace(mainThread),
+                                "allThreads" to allThreadStacks(),
+                            ),
                         )
                     }
                 }
@@ -125,28 +217,25 @@ object DiagnosticsLog {
             isDaemon = true
             start()
         }
-        event("main thread watchdog started")
+        event("thread", "main.watchdog.started")
     }
 
     fun snapshot(context: Context, label: String) {
-        val app = context.applicationContext
-        val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        val memoryInfo = ActivityManager.MemoryInfo().also { info ->
-            runCatching { activityManager?.getMemoryInfo(info) }
-        }
-        val runtime = Runtime.getRuntime()
-        val configuration = app.resources.configuration
         event(
-            "$label snapshot " +
-                "orientation=${orientation(configuration)} uiMode=${uiMode(configuration)} " +
-                "fontScale=${configuration.fontScale} " +
-                "screenDp=${configuration.screenWidthDp}x${configuration.screenHeightDp} " +
-                "smallestDp=${configuration.smallestScreenWidthDp} " +
-                "memAvailMb=${memoryInfo.availMem / 1024 / 1024} " +
-                "memLow=${memoryInfo.lowMemory} " +
-                "heapUsedMb=${(runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024} " +
-                "heapMaxMb=${runtime.maxMemory() / 1024 / 1024}",
+            category = "system",
+            name = "system.snapshot",
+            attributes = systemSnapshot(context) + ("label" to label),
         )
+    }
+
+    fun deviceProfile(context: Context) {
+        runCatching {
+            event(
+                category = "system",
+                name = "device.profile",
+                attributes = deviceProfileMap(context) + networkSnapshot(context),
+            )
+        }.onFailure { throwable("device profile unavailable", it) }
     }
 
     fun webViewPackage(label: String) {
@@ -156,8 +245,14 @@ object DiagnosticsLog {
             null
         }
         event(
-            "$label webviewPackage=" +
-                if (pkg == null) "none" else "${pkg.packageName}/${pkg.versionName} (${pkg.longVersionCodeCompat()})",
+            category = "webview",
+            name = "webview.package",
+            attributes = mapOf(
+                "label" to label,
+                "package" to (pkg?.packageName ?: "none"),
+                "version" to (pkg?.versionName ?: "none"),
+                "versionCode" to (pkg?.longVersionCodeCompat() ?: 0L),
+            ),
         )
     }
 
@@ -166,22 +261,29 @@ object DiagnosticsLog {
         val drawn = AtomicBoolean(false)
         view.post {
             event(
-                "$label decor posted attached=${view.isAttachedToWindow} " +
-                    "shown=${view.isShown} size=${view.width}x${view.height} visibility=${view.visibility}",
+                "render",
+                "decor.posted",
+                viewAttributes(view) + mapOf("label" to label),
             )
         }
         Choreographer.getInstance().postFrameCallback {
-            event("$label first choreographer frame after ${SystemClock.elapsedRealtime() - startedAt}ms")
+            event(
+                "render",
+                "first.choreographer_frame",
+                mapOf("label" to label, "elapsedMs" to (SystemClock.elapsedRealtime() - startedAt)),
+            )
         }
         val listener = object : ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
                 if (drawn.compareAndSet(false, true)) {
-                    if (view.viewTreeObserver.isAlive) {
-                        view.viewTreeObserver.removeOnPreDrawListener(this)
-                    }
+                    if (view.viewTreeObserver.isAlive) view.viewTreeObserver.removeOnPreDrawListener(this)
                     event(
-                        "$label first pre-draw after ${SystemClock.elapsedRealtime() - startedAt}ms " +
-                            "attached=${view.isAttachedToWindow} shown=${view.isShown} size=${view.width}x${view.height}",
+                        "render",
+                        "first.pre_draw",
+                        viewAttributes(view) + mapOf(
+                            "label" to label,
+                            "elapsedMs" to (SystemClock.elapsedRealtime() - startedAt),
+                        ),
                     )
                 }
                 return true
@@ -191,272 +293,572 @@ object DiagnosticsLog {
         view.postDelayed({
             if (!drawn.get()) {
                 event(
-                    "$label NO pre-draw after ${timeoutMs}ms " +
-                        "attached=${view.isAttachedToWindow} shown=${view.isShown} size=${view.width}x${view.height} " +
-                        "visibility=${view.visibility} windowFocus=${view.hasWindowFocus()}",
+                    "render",
+                    "first.pre_draw.timeout",
+                    viewAttributes(view) + mapOf("label" to label, "timeoutMs" to timeoutMs),
                 )
             }
         }, timeoutMs)
     }
 
-    /**
-     * One line that identifies the machine a report came from.
-     *
-     * Most reports arrive as "it closes on my Fire Stick", and the sticks are not one device: a
-     * 1st-gen stick is a 1 GB, API 22, Fire OS 5 box with an ancient Amazon WebView, while a 4K Max
-     * is 2 GB and API 32. Those fail in completely different ways, and without this the report
-     * cannot be mapped to either. `isLowRamDevice` is the single most useful bit here — it is what
-     * the platform itself uses to decide how aggressively to kill us.
-     */
-    fun deviceProfile(context: Context) {
-        runCatching {
-            val app = context.applicationContext
-            val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-            val fireOs = listOf("ro.build.version.fireos", "ro.build.version.fireos.sdk")
-                .firstNotNullOfOrNull { systemProperty(it)?.takeIf(String::isNotBlank) }
-            val amazonDevice = Build.MANUFACTURER.equals("Amazon", ignoreCase = true)
-            event(
-                "device profile manufacturer=${Build.MANUFACTURER} model=${Build.MODEL} " +
-                    "device=${Build.DEVICE} product=${Build.PRODUCT} " +
-                    "sdk=${Build.VERSION.SDK_INT} fireOs=${fireOs ?: if (amazonDevice) "amazon-unknown" else "no"} " +
-                    "lowRam=${activityManager?.isLowRamDevice} " +
-                    "memoryClassMb=${activityManager?.memoryClass} " +
-                    "largeMemoryClassMb=${activityManager?.largeMemoryClass} " +
-                    "abis=${Build.SUPPORTED_ABIS.joinToString("/")} " +
-                    "network=${networkSummary(app)}",
-            )
-        }.onFailure { throwable("device profile unavailable", it) }
-    }
-
-    /** Wi-Fi versus Ethernet matters on TV: the sticks throttle Wi-Fi hard under memory pressure. */
-    private fun networkSummary(context: Context): String = runCatching {
-        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? android.net.ConnectivityManager ?: return "unknown"
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "legacy"
-        val network = manager.activeNetwork ?: return "offline"
-        val caps = manager.getNetworkCapabilities(network) ?: return "unknown"
-        val transport = when {
-            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-            else -> "other"
-        }
-        "$transport,downKbps=${caps.linkDownstreamBandwidthKbps},upKbps=${caps.linkUpstreamBandwidthKbps}"
-    }.getOrDefault("unknown")
-
-    private fun systemProperty(key: String): String? = runCatching {
-        @Suppress("PrivateApi")
-        val systemProperties = Class.forName("android.os.SystemProperties")
-        systemProperties.getMethod("get", String::class.java).invoke(null, key) as? String
-    }.getOrNull()
-
-    /**
-     * Why the process died last time, straight from the system.
-     *
-     * A TV that "just exits" is the least diagnosable failure this app has: when the kill comes
-     * from outside the process — the low-memory killer, an ANR, the system reclaiming the task —
-     * nothing lands in the crash log, and the user can only report that it closed. The platform
-     * has kept the real reason since API 30; reading it back on the next launch turns "it exits on
-     * One Piece" into a specific cause without needing a reproduction.
-     */
+    /** Captures system-owned exit reasons plus ANR/native traces on Android 11 and newer. */
     fun logPreviousExits(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            event("previous exit reasons unavailable on API ${Build.VERSION.SDK_INT}")
+            event("process", "exit_history.unavailable", mapOf("sdk" to Build.VERSION.SDK_INT))
             return
         }
         runCatching {
-            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-                ?: return
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
             val exits = manager.getHistoricalProcessExitReasons(context.packageName, 0, 5)
             if (exits.isEmpty()) {
-                event("no previous process exits recorded")
+                event("process", "exit_history.empty")
                 return
             }
-            exits.forEach { info ->
+            exits.forEachIndexed { index, info ->
+                val state = info.processStateSummary
+                    ?.toString(StandardCharsets.UTF_8)
+                    ?.let(DiagnosticRedactor::redactText)
+                val traceName = saveExitTrace(context, index, info)
                 event(
-                    "previous exit reason=${exitReasonName(info.reason)} status=${info.status} " +
-                        "importance=${info.importance} pssKb=${info.pss} rssKb=${info.rss} " +
-                        "at=${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(info.timestamp))} " +
-                        "description=${info.description ?: "none"}",
+                    category = "process",
+                    name = "process.previous_exit",
+                    attributes = mapOf(
+                        "reason" to exitReasonName(info.reason),
+                        "status" to info.status,
+                        "importance" to info.importance,
+                        "pssKb" to info.pss,
+                        "rssKb" to info.rss,
+                        "timestampMs" to info.timestamp,
+                        "process" to info.processName,
+                        "pid" to info.pid,
+                        "description" to (info.description ?: "none"),
+                        "processState" to (state ?: "none"),
+                        "traceFile" to (traceName ?: "none"),
+                    ),
                 )
             }
         }.onFailure { throwable("previous exit reasons unavailable", it) }
     }
 
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
-    private fun exitReasonName(reason: Int): String = when (reason) {
-        android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
-        android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH"
-        android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
-        android.app.ApplicationExitInfo.REASON_ANR -> "ANR"
-        android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INIT_FAILURE"
-        android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE"
-        android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCES"
-        android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
-        android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
-        android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
-        android.app.ApplicationExitInfo.REASON_OTHER -> "OTHER"
-        android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
-        android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
-        // Routine on every install; naming them keeps the genuinely interesting reasons legible.
-        android.app.ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "PACKAGE_STATE_CHANGE"
-        android.app.ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "PACKAGE_UPDATED"
-        android.app.ApplicationExitInfo.REASON_FREEZER -> "FREEZER"
-        else -> "UNKNOWN($reason)"
-    }
-
-    fun event(message: String) {
-        append("${timestamp()} +${SystemClock.elapsedRealtime()}ms  $message\n")
-    }
-
-    fun throwable(message: String, throwable: Throwable) {
-        val trace = StringWriter().also { throwable.printStackTrace(PrintWriter(it)) }.toString()
-        append(
-            buildString {
-                append(timestamp())
-                append(" +")
-                append(SystemClock.elapsedRealtime())
-                append("ms")
-                append("  ")
-                append(message)
-                append(": ")
-                append(throwable.javaClass.name)
-                throwable.message?.let { append(": ").append(it) }
-                append('\n')
-                append(trace)
-                append('\n')
-            },
-        )
-    }
-
-    fun share(context: Context): Result<Unit> = runCatching {
-        event("diagnostics share requested")
-        val snapshot = createShareSnapshot(context.applicationContext)
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            snapshot,
-        )
-        val send = Intent(Intent.ACTION_SEND)
-            .setType("text/plain")
-            .putExtra(Intent.EXTRA_SUBJECT, "Anilili diagnostics")
-            .putExtra(Intent.EXTRA_TEXT, "Anilili diagnostics are attached.")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        send.clipData = ClipData.newUri(context.contentResolver, "Anilili diagnostics", uri)
-        val chooser = Intent.createChooser(send, "Share diagnostics")
-        if (context !is Activity) chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(chooser)
-    }.onFailure { throwable("diagnostics share failed", it) }
-
-    // Writes happen on a dedicated thread: appends used to run synchronously on whatever thread
-    // logged (usually main), and on a memory-starved Fire TV a single flash write inside
-    // onTrimMemory blocked the main thread for 17+ seconds — during playback, at the worst
-    // possible moment. The single thread preserves log ordering.
-    private val writeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "anilili-diagnostics-log").apply { isDaemon = true }
-    }
-
-    private fun append(text: String) {
-        writeExecutor.execute {
-            val target = file ?: appContext?.let {
-                File(it.filesDir, LOG_DIR).resolve(LOG_FILE).also { resolved -> file = resolved }
-            } ?: return@execute
-            runCatching {
-                synchronized(lock) {
-                    target.parentFile?.mkdirs()
-                    trimIfNeeded(target)
-                    target.appendText(text)
-                }
+    /** Uses Android 15's authoritative cold/warm/hot and first-frame startup record. */
+    fun installApplicationStartInfoListener(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return
+        runCatching {
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+            lateinit var listener: Consumer<ApplicationStartInfo>
+            listener = Consumer { info ->
+                logApplicationStartInfo(info)
+                runCatching { manager.removeApplicationStartInfoCompletionListener(listener) }
             }
+            manager.addApplicationStartInfoCompletionListener(context.mainExecutor, listener)
+        }.onFailure { throwable("application start info unavailable", it) }
+    }
+
+    fun updateProcessState(component: String, state: String, attributes: Map<String, Any?> = emptyMap()) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastProcessStateAt < PROCESS_STATE_MIN_INTERVAL_MS) return
+        lastProcessStateAt = now
+        val safe = buildString {
+            append(component.take(24))
+            append(':')
+            append(DiagnosticRedactor.redactText(state).take(72))
+            DiagnosticRedactor.redactAttributes(attributes).entries.take(3).forEach { (key, value) ->
+                append(';').append(key.take(12)).append('=').append(value.take(20))
+            }
+        }.toByteArray(StandardCharsets.UTF_8).take(128).toByteArray()
+        runCatching {
+            (appContext?.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+                ?.setProcessStateSummary(safe)
+        }.onFailure { throwable("process state summary unavailable", it) }
+    }
+
+    suspend fun share(context: Context): Result<Unit> {
+        if (!shareInProgress.compareAndSet(false, true)) return Result.success(Unit)
+        try {
+            event("share", "report.share_requested")
+            val reportResult = withContext(Dispatchers.IO) {
+                runCatching { createShareSnapshot(context.applicationContext) }
+            }
+            val report = reportResult.getOrElse { error ->
+                throwable("diagnostics share failed", error)
+                return Result.failure(error)
+            }
+            return try {
+                withContext(Dispatchers.Main.immediate) {
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        report,
+                    )
+                    val send = Intent(Intent.ACTION_SEND)
+                        .setType("application/zip")
+                        .putExtra(Intent.EXTRA_SUBJECT, "Anilili diagnostics")
+                        .putExtra(
+                            Intent.EXTRA_TEXT,
+                            "Anilili diagnostics are attached. Common sensitive values are redacted; " +
+                                "Android native crash traces can contain low-level device or process details.",
+                        )
+                        .putExtra(Intent.EXTRA_STREAM, uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    send.clipData = ClipData.newUri(context.contentResolver, "Anilili diagnostics", uri)
+                    val chooser = Intent.createChooser(send, "Share diagnostics")
+                    if (context !is Activity) chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(chooser)
+                }
+                Result.success(Unit)
+            } catch (error: Throwable) {
+                throwable("diagnostics share failed", error)
+                Result.failure(error)
+            }
+        } finally {
+            shareInProgress.set(false)
         }
     }
 
-    fun threadStack(message: String, thread: Thread) {
-        append(
-            buildString {
-                append(timestamp())
-                append(" +")
-                append(SystemClock.elapsedRealtime())
-                append("ms  ")
-                append(message)
-                append('\n')
-                append(stackTrace(thread))
-                append('\n')
-            },
-        )
-    }
-
-    /**
-     * TV path C: copies the snapshot into the device's public Downloads so it can also be pulled
-     * with a file manager or over USB. Timestamped so repeated shares don't shadow each other.
-     */
-    fun saveToDownloads(context: Context, snapshot: File): Result<String> = runCatching {
-        val name = "Anilili-diagnostics-" +
-            SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".txt"
+    /** Explicit TV action: writes the already-redacted ZIP to public Downloads. */
+    fun saveToDownloads(context: Context, report: File): Result<String> = runCatching {
+        val name = "Anilili-diagnostics-${fileTimestamp()}.zip"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val resolver = context.contentResolver
             val values = android.content.ContentValues().apply {
                 put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/zip")
             }
-            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: error("Couldn't create a Downloads entry")
-            resolver.openOutputStream(uri)?.use { out ->
-                snapshot.inputStream().use { it.copyTo(out) }
+            val uri = context.contentResolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                values,
+            ) ?: error("Couldn't create a Downloads entry")
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                report.inputStream().use { it.copyTo(out) }
             } ?: error("Couldn't write to Downloads")
         } else {
             @Suppress("DEPRECATION")
-            val dir = android.os.Environment.getExternalStoragePublicDirectory(
+            val directory = android.os.Environment.getExternalStoragePublicDirectory(
                 android.os.Environment.DIRECTORY_DOWNLOADS,
             )
-            dir.mkdirs()
-            snapshot.copyTo(File(dir, name), overwrite = true)
+            directory.mkdirs()
+            report.copyTo(File(directory, name), overwrite = true)
         }
-        event("diagnostics saved to Downloads/$name")
+        event("share", "report.saved_to_downloads", mapOf("fileName" to name))
         "Downloads/$name"
     }.onFailure { throwable("diagnostics downloads save failed", it) }
 
+    @Synchronized
     fun createShareSnapshot(context: Context): File {
-        val dir = File(context.cacheDir, LOG_DIR).apply { mkdirs() }
-        val snapshot = File(dir, SHARE_FILE)
-        synchronized(lock) {
-            snapshot.writeText(
-                buildString {
-                    appendLine("Anilili diagnostics")
-                    appendLine("generated: ${timestamp()}")
-                    appendLine("app: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) ${BuildConfig.BUILD_TYPE}")
-                    appendLine("device: ${Build.MANUFACTURER} ${Build.MODEL}")
-                    appendLine("android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-                    appendLine()
-                    appendLine("== rolling log ==")
-                    append(activeFile()?.takeIf { it.exists() }?.readText().orEmpty())
-                    appendLine()
-                    appendLine("== last crash dialog report ==")
-                    append(CrashReporter.pendingReport().orEmpty())
-                },
+        snapshot(context, "report-generation")
+        flush()
+        val diagnosticsDir = diagnosticsDirectory(context)
+        val outputDirectory = File(context.cacheDir, LOG_DIR).apply { mkdirs() }
+        cleanupCachedReports(outputDirectory)
+        val reportName = "$SHARE_FILE_PREFIX-${fileTimestamp()}-${UUID.randomUUID().toString().take(8)}.zip"
+        val report = outputDirectory.resolve(reportName)
+        val temporary = outputDirectory.resolve("$reportName.tmp")
+        val eventSnapshotDirectory = outputDirectory.resolve("event-snapshot-${UUID.randomUUID()}")
+        try {
+            val eventFiles = DiagnosticFileStore.snapshotEventFiles(diagnosticsDir, eventSnapshotDirectory)
+            var eventCount = 0
+            val recentLines = ArrayDeque<String>(MAX_RECENT_SUMMARY_EVENTS)
+            DiagnosticFileStore.forEachOrderedLine(eventFiles) { line ->
+                eventCount++
+                if (recentLines.size == MAX_RECENT_SUMMARY_EVENTS) recentLines.removeFirst()
+                recentLines.addLast(line)
+            }
+            val system = systemSnapshot(context) + deviceProfileMap(context) + networkSnapshot(context)
+            val work = workManagerSummary(context)
+            val manifest = DiagnosticManifest(
+                generatedUtc = timestampUtc(),
+                appVersion = BuildConfig.VERSION_NAME,
+                versionCode = BuildConfig.VERSION_CODE,
+                buildType = BuildConfig.BUILD_TYPE,
+                buildSha = BuildConfig.GIT_SHA,
+                packageName = context.packageName,
+                device = system,
+                diagnostics = mapOf(
+                    "eventCount" to eventCount.toString(),
+                    "droppedEventsThisProcess" to (store?.droppedCount() ?: 0L).toString(),
+                    "sessionId" to sessionId,
+                    "process" to processName,
+                    "format" to "zip/jsonl",
+                    "privacy" to "central-redaction-enabled",
+                    "nativeTracePrivacy" to "raw-system-trace-may-contain-device-or-process-details",
+                ),
+            )
+            ZipOutputStream(FileOutputStream(temporary).buffered()).use { zip ->
+                zip.putText("manifest.json", DiagnosticEventCodec.encode(manifest))
+                zip.putText("summary.txt", humanSummary(manifest, recentLines.toList(), eventCount, work))
+                zip.putEventLines("events.jsonl", eventFiles)
+                CrashReporter.pendingReport()?.takeIf(String::isNotBlank)?.let { reportText ->
+                    zip.putText("crash.txt", DiagnosticRedactor.redactText(reportText))
+                }
+                zip.putText("workmanager.txt", work)
+                diagnosticsDir.listFiles()
+                    .orEmpty()
+                    .filter { it.isFile && it.name.startsWith("exit-") }
+                    .sortedByDescending(File::lastModified)
+                    .take(5)
+                    .forEach { trace -> zip.putFile("exit-traces/${trace.name}", trace) }
+            }
+            if (report.exists()) report.delete()
+            if (!temporary.renameTo(report)) {
+                temporary.copyTo(report, overwrite = true)
+                temporary.delete()
+            }
+            event("share", "report.created", mapOf("bytes" to report.length(), "events" to eventCount))
+            return report
+        } finally {
+            runCatching { temporary.delete() }
+            runCatching { eventSnapshotDirectory.deleteRecursively() }
+        }
+    }
+
+    private fun recordThrowable(level: String, message: String, throwable: Throwable, blocking: Boolean) {
+        val trace = StringWriter().also { throwable.printStackTrace(PrintWriter(it)) }.toString()
+        val event = newEvent(
+            level = level,
+            category = inferredCategory(message),
+            name = if (level == "FATAL") "exception.fatal" else "exception.caught",
+            message = message,
+            exception = DiagnosticException(
+                type = throwable.javaClass.name,
+                message = throwable.message,
+                stackTrace = trace,
+            ),
+        )
+        if (blocking) store?.appendBlocking(event) else store?.append(event)
+    }
+
+    private fun record(
+        level: String,
+        category: String,
+        name: String,
+        message: String? = null,
+        attributes: Map<String, String> = emptyMap(),
+    ) {
+        store?.append(newEvent(level, category, name, message, attributes))
+    }
+
+    private fun newEvent(
+        level: String,
+        category: String,
+        name: String,
+        message: String? = null,
+        attributes: Map<String, String> = emptyMap(),
+        exception: DiagnosticException? = null,
+    ): DiagnosticEvent {
+        val thread = Thread.currentThread()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        return DiagnosticEvent(
+            timestampUtc = timestampUtc(),
+            elapsedRealtimeMs = nowElapsed,
+            processUptimeMs = (nowElapsed - processStartedElapsedMs).coerceAtLeast(0),
+            sessionId = sessionId,
+            sequence = sequence.incrementAndGet(),
+            process = processName,
+            pid = Process.myPid(),
+            thread = thread.name,
+            threadId = thread.id,
+            level = level,
+            category = category.lowercase(Locale.US).take(40),
+            name = name.lowercase(Locale.US).replace(' ', '_').take(80),
+            message = message,
+            attributes = attributes,
+            exception = exception,
+        )
+    }
+
+    private fun lifecycle(activity: Activity, state: String, extra: Map<String, Any?> = emptyMap()) {
+        event(
+            category = "lifecycle",
+            name = "activity.$state",
+            attributes = mapOf("activity" to activity.javaClass.simpleName) + extra,
+        )
+    }
+
+    private fun systemSnapshot(context: Context): Map<String, String> {
+        val app = context.applicationContext
+        val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val memory = ActivityManager.MemoryInfo().also { runCatching { activityManager?.getMemoryInfo(it) } }
+        val runtime = Runtime.getRuntime()
+        val configuration = app.resources.configuration
+        val battery = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val power = app.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val display = (app.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+            ?.getDisplay(Display.DEFAULT_DISPLAY)
+        val hdrTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            display?.hdrCapabilities?.supportedHdrTypes?.joinToString("/").orEmpty()
+        } else {
+            "unavailable"
+        }
+        return mapOf(
+            "orientation" to orientation(configuration),
+            "uiMode" to uiMode(configuration),
+            "fontScale" to configuration.fontScale.toString(),
+            "screenDp" to "${configuration.screenWidthDp}x${configuration.screenHeightDp}",
+            "smallestDp" to configuration.smallestScreenWidthDp.toString(),
+            "memoryAvailableMb" to (memory.availMem / 1024 / 1024).toString(),
+            "memoryLow" to memory.lowMemory.toString(),
+            "memoryThresholdMb" to (memory.threshold / 1024 / 1024).toString(),
+            "heapUsedMb" to ((runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024).toString(),
+            "heapMaxMb" to (runtime.maxMemory() / 1024 / 1024).toString(),
+            "storageAvailableMb" to (app.filesDir.usableSpace / 1024 / 1024).toString(),
+            "storageTotalMb" to (app.filesDir.totalSpace / 1024 / 1024).toString(),
+            "batteryPercent" to batteryPercent(battery).toString(),
+            "batteryCharging" to batteryCharging(battery).toString(),
+            "batteryTemperatureC" to ((battery?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f).toString(),
+            "thermalStatus" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                power?.currentThermalStatus?.toString() ?: "unknown"
+            } else {
+                "unavailable"
+            },
+            "display" to displaySummary(display),
+            "hdrTypes" to hdrTypes,
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun displaySummary(display: Display?): String {
+        if (display == null) return "unknown"
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            display.mode.let { "${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}" }
+        } else {
+            "${display.width}x${display.height}@${display.refreshRate}"
+        }
+    }
+
+    private fun deviceProfileMap(context: Context): Map<String, String> {
+        val activityManager = context.applicationContext
+            .getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val fireOs = listOf("ro.build.version.fireos", "ro.build.version.fireos.sdk")
+            .firstNotNullOfOrNull { systemProperty(it)?.takeIf(String::isNotBlank) }
+        val amazon = Build.MANUFACTURER.equals("Amazon", ignoreCase = true)
+        return mapOf(
+            "manufacturer" to Build.MANUFACTURER,
+            "model" to Build.MODEL,
+            "device" to Build.DEVICE,
+            "product" to Build.PRODUCT,
+            "fingerprint" to Build.FINGERPRINT,
+            "android" to Build.VERSION.RELEASE,
+            "sdk" to Build.VERSION.SDK_INT.toString(),
+            "securityPatch" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Build.VERSION.SECURITY_PATCH else "unavailable",
+            "fireOs" to (fireOs ?: if (amazon) "amazon-unknown" else "no"),
+            "lowRam" to (activityManager?.isLowRamDevice?.toString() ?: "unknown"),
+            "memoryClassMb" to (activityManager?.memoryClass?.toString() ?: "unknown"),
+            "largeMemoryClassMb" to (activityManager?.largeMemoryClass?.toString() ?: "unknown"),
+            "abis" to Build.SUPPORTED_ABIS.joinToString("/"),
+        )
+    }
+
+    private fun networkSnapshot(context: Context): Map<String, String> = runCatching {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return mapOf("network" to "unknown")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            @Suppress("DEPRECATION")
+            return mapOf(
+                "network" to (manager.activeNetworkInfo?.typeName?.lowercase(Locale.US) ?: "offline"),
             )
         }
-        return snapshot
+        val network = manager.activeNetwork ?: return mapOf("network" to "offline")
+        val capabilities = manager.getNetworkCapabilities(network)
+            ?: return mapOf("network" to "unknown")
+        mapOf(
+            "network" to networkTransport(capabilities),
+            "networkValidated" to capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED).toString(),
+            "networkMetered" to (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)).toString(),
+            "networkCaptivePortal" to capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL).toString(),
+            "networkVpn" to capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN).toString(),
+            "networkDownKbps" to capabilities.linkDownstreamBandwidthKbps.toString(),
+            "networkUpKbps" to capabilities.linkUpstreamBandwidthKbps.toString(),
+        )
+    }.getOrElse { mapOf("network" to "unknown") }
+
+    private fun workManagerSummary(context: Context): String {
+        if (processName.endsWith(":diagnostics")) return "Unavailable from the lightweight diagnostics process."
+        return runCatching {
+            val manager = WorkManager.getInstance(context.applicationContext)
+            listOf("episode-export", "release-sync").joinToString("\n") { tag ->
+                val infos = manager.getWorkInfosByTag(tag).get(2, TimeUnit.SECONDS)
+                val states = infos.groupingBy { it.state.name }.eachCount()
+                "$tag: total=${infos.size} states=$states"
+            }
+        }.getOrElse { "WorkManager snapshot unavailable: ${it.javaClass.simpleName}" }
     }
 
-    private fun trimIfNeeded(target: File) {
-        if (!target.exists() || target.length() <= MAX_BYTES) return
-        val bytes = target.readBytes()
-        val start = (bytes.size - TRIM_TO_BYTES).coerceAtLeast(0)
-        target.writeBytes(bytes.copyOfRange(start, bytes.size))
-        target.appendText("\n${timestamp()}  log trimmed to last ${TRIM_TO_BYTES / 1000}KB\n")
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private fun saveExitTrace(context: Context, index: Int, info: ApplicationExitInfo): String? = runCatching {
+        val input = info.traceInputStream ?: return null
+        val nativeTrace = info.reason == ApplicationExitInfo.REASON_CRASH_NATIVE &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        val extension = if (nativeTrace) "pb" else "txt"
+        val target = diagnosticsDirectory(context).resolve(
+            "exit-${info.timestamp}-$index-${exitReasonName(info.reason).lowercase(Locale.US)}.$extension",
+        )
+        input.use { source ->
+            val bytes = source.readBytesCapped(MAX_EXIT_TRACE_BYTES)
+            if (nativeTrace) {
+                target.writeBytes(bytes)
+            } else {
+                target.writeText(
+                    DiagnosticRedactor.redactText(bytes.toString(StandardCharsets.UTF_8)),
+                    StandardCharsets.UTF_8,
+                )
+            }
+        }
+        cleanupExitTraces(context)
+        target.name
+    }.getOrNull()
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private fun logApplicationStartInfo(info: ApplicationStartInfo) {
+        val timestamps = info.startupTimestamps
+        val fork = timestamps[ApplicationStartInfo.START_TIMESTAMP_FORK]
+        val firstFrame = timestamps[ApplicationStartInfo.START_TIMESTAMP_FIRST_FRAME]
+        val attributes = mutableMapOf<String, Any?>(
+            "reason" to startReasonName(info.reason),
+            "startType" to startTypeName(info.startType),
+            "startupState" to info.startupState,
+            "process" to info.processName,
+            "pid" to info.pid,
+            "wasForceStopped" to info.wasForceStopped(),
+            "forkToFirstFrameMs" to if (fork != null && firstFrame != null) (firstFrame - fork) / 1_000_000 else "unknown",
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            attributes["startComponent"] = info.startComponent
+        }
+        event("startup", "application.start_info", attributes)
     }
 
-    private fun activeFile(): File? = file ?: appContext?.let {
-        File(it.filesDir, LOG_DIR).resolve(LOG_FILE).also { resolved -> file = resolved }
+    private fun humanSummary(
+        manifest: DiagnosticManifest,
+        recentLines: List<String>,
+        eventCount: Int,
+        work: String,
+    ): String = buildString {
+        appendLine("Anilili diagnostics")
+        appendLine("Generated: ${manifest.generatedUtc}")
+        appendLine("App: ${manifest.appVersion} (${manifest.versionCode}) ${manifest.buildType}")
+        appendLine("Build: ${manifest.buildSha}")
+        appendLine("Device: ${manifest.device["manufacturer"]} ${manifest.device["model"]}")
+        appendLine("Android: ${manifest.device["android"]} (SDK ${manifest.device["sdk"]})")
+        appendLine("Events: $eventCount")
+        appendLine("Privacy: URL paths/query strings, credentials, tokens, cookies, search terms, titles, and slugs are redacted.")
+        appendLine("Native traces: raw Android native-crash traces can contain low-level device or process details.")
+        appendLine()
+        appendLine("== system ==")
+        manifest.device.toSortedMap().forEach { (key, value) -> appendLine("$key: $value") }
+        appendLine()
+        appendLine("== background work ==")
+        appendLine(work)
+        appendLine()
+        appendLine("== recent events ==")
+        recentLines.forEach { line ->
+            runCatching { DiagnosticEventCodec.decode(line) }.getOrNull()?.let { event ->
+                append(event.timestampUtc)
+                append(" [${event.level}/${event.category}] ")
+                append(event.name)
+                event.message?.let { append(" — ").append(it) }
+                if (event.attributes.isNotEmpty()) append(" ").append(event.attributes)
+                event.exception?.let { append(" — ").append(it.type).append(": ").append(it.message.orEmpty()) }
+                appendLine()
+            }
+        }
     }
 
-    private fun timestamp(): String =
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+    private fun maybeUpdateProcessState(message: String) {
+        val important = listOf("Nav route=", "PlaybackService player state=", "PlaybackService route=", "Watch resolve")
+            .firstOrNull(message::startsWith) ?: return
+        updateProcessState(important.substringBefore(' ').lowercase(Locale.US), message)
+    }
+
+    private fun inferredCategory(message: String): String = message
+        .substringBefore(' ')
+        .substringBefore('.')
+        .replace(categorySanitizer, "")
+        .ifBlank { "app" }
+        .lowercase(Locale.US)
+
+    private fun inferredName(message: String): String = message
+        .substringBefore(' ')
+        .replace(eventNameSanitizer, "_")
+        .ifBlank { "event" }
+        .lowercase(Locale.US)
+
+    private fun allThreadStacks(): String = Thread.getAllStackTraces()
+        .entries
+        .sortedBy { it.key.name }
+        .take(24)
+        .joinToString("\n") { (thread, frames) ->
+            buildString {
+                append('"').append(thread.name).append("\" state=").append(thread.state).append('\n')
+                frames.take(120).forEach { append("    at ").append(it).append('\n') }
+            }
+        }
 
     private fun stackTrace(thread: Thread): String =
         thread.stackTrace.joinToString("\n") { "    at $it" }
+
+    private fun viewAttributes(view: View): Map<String, Any?> = mapOf(
+        "attached" to view.isAttachedToWindow,
+        "shown" to view.isShown,
+        "width" to view.width,
+        "height" to view.height,
+        "visibility" to view.visibility,
+        "windowFocus" to view.hasWindowFocus(),
+    )
+
+    private fun batteryPercent(intent: Intent?): Int {
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+    }
+
+    private fun batteryCharging(intent: Intent?): Boolean {
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    private fun networkTransport(capabilities: NetworkCapabilities): String = when {
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "bluetooth"
+        else -> "other"
+    }
+
+    private fun cleanupExitTraces(context: Context) {
+        diagnosticsDirectory(context).listFiles()
+            .orEmpty()
+            .filter { it.isFile && it.name.startsWith("exit-") }
+            .sortedByDescending(File::lastModified)
+            .drop(5)
+            .forEach(File::delete)
+    }
+
+    private fun cleanupCachedReports(directory: File) {
+        val cutoff = System.currentTimeMillis() - CACHED_REPORT_MAX_AGE_MS
+        directory.listFiles()
+            .orEmpty()
+            .filter { file ->
+                file.isFile && file.name.startsWith(SHARE_FILE_PREFIX) && file.lastModified() < cutoff
+            }
+            .forEach { file -> runCatching { file.delete() } }
+    }
+
+    private fun systemProperty(key: String): String? = runCatching {
+        @Suppress("PrivateApi")
+        val properties = Class.forName("android.os.SystemProperties")
+        properties.getMethod("get", String::class.java).invoke(null, key) as? String
+    }.getOrNull()
+
+    private fun diagnosticsDirectory(context: Context): File =
+        File(context.applicationContext.filesDir, LOG_DIR).apply { mkdirs() }
+
+    private fun timestampUtc(): String = SimpleDateFormat(
+        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+        Locale.US,
+    ).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date())
+
+    private fun fileTimestamp(): String = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
 
     private fun orientation(configuration: Configuration): String = when (configuration.orientation) {
         Configuration.ORIENTATION_LANDSCAPE -> "landscape"
@@ -474,6 +876,97 @@ object DiagnosticsLog {
         else -> "unknown"
     }
 
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private fun exitReasonName(reason: Int): String = when (reason) {
+        ApplicationExitInfo.REASON_UNKNOWN -> "UNKNOWN"
+        ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
+        ApplicationExitInfo.REASON_CRASH -> "CRASH"
+        ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
+        ApplicationExitInfo.REASON_ANR -> "ANR"
+        ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INIT_FAILURE"
+        ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE"
+        ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCES"
+        ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+        ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
+        ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
+        ApplicationExitInfo.REASON_OTHER -> "OTHER"
+        ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+        ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
+        ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "PACKAGE_STATE_CHANGE"
+        ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "PACKAGE_UPDATED"
+        ApplicationExitInfo.REASON_FREEZER -> "FREEZER"
+        else -> "UNKNOWN($reason)"
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private fun startReasonName(reason: Int): String = when (reason) {
+        ApplicationStartInfo.START_REASON_ALARM -> "ALARM"
+        ApplicationStartInfo.START_REASON_BACKUP -> "BACKUP"
+        ApplicationStartInfo.START_REASON_BOOT_COMPLETE -> "BOOT_COMPLETE"
+        ApplicationStartInfo.START_REASON_BROADCAST -> "BROADCAST"
+        ApplicationStartInfo.START_REASON_CONTENT_PROVIDER -> "CONTENT_PROVIDER"
+        ApplicationStartInfo.START_REASON_JOB -> "JOB"
+        ApplicationStartInfo.START_REASON_LAUNCHER -> "LAUNCHER"
+        ApplicationStartInfo.START_REASON_LAUNCHER_RECENTS -> "LAUNCHER_RECENTS"
+        ApplicationStartInfo.START_REASON_PUSH -> "PUSH"
+        ApplicationStartInfo.START_REASON_SERVICE -> "SERVICE"
+        ApplicationStartInfo.START_REASON_START_ACTIVITY -> "START_ACTIVITY"
+        else -> "OTHER($reason)"
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    private fun startTypeName(type: Int): String = when (type) {
+        ApplicationStartInfo.START_TYPE_COLD -> "COLD"
+        ApplicationStartInfo.START_TYPE_WARM -> "WARM"
+        ApplicationStartInfo.START_TYPE_HOT -> "HOT"
+        else -> "UNSET"
+    }
+
+    private fun currentProcessName(context: Context): String? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Application.getProcessName()
+        } else {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+                ?.runningAppProcesses
+                ?.firstOrNull { it.pid == Process.myPid() }
+                ?.processName
+        }
+
     private fun android.content.pm.PackageInfo.longVersionCodeCompat(): Long =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) longVersionCode else versionCode.toLong()
+
+    private fun java.io.InputStream.readBytesCapped(maxBytes: Long): ByteArray {
+        val output = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var remaining = maxBytes
+        while (remaining > 0) {
+            val read = read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+            if (read < 0) break
+            output.write(buffer, 0, read)
+            remaining -= read
+        }
+        return output.toByteArray()
+    }
+
+    private fun ZipOutputStream.putText(name: String, text: String) {
+        putNextEntry(ZipEntry(name))
+        write(text.toByteArray(StandardCharsets.UTF_8))
+        closeEntry()
+    }
+
+    private fun ZipOutputStream.putEventLines(name: String, eventFiles: List<File>) {
+        putNextEntry(ZipEntry(name))
+        DiagnosticFileStore.forEachOrderedLine(eventFiles) { line ->
+            write(line.toByteArray(StandardCharsets.UTF_8))
+            write('\n'.code)
+        }
+        closeEntry()
+    }
+
+    private fun ZipOutputStream.putFile(name: String, file: File) {
+        putNextEntry(ZipEntry(name))
+        file.inputStream().use { it.copyTo(this) }
+        closeEntry()
+    }
 }

@@ -546,11 +546,13 @@ fun SettingsScreen(
                     onClick = {
                         diagnosticsMessage = null
                         if (device.isTv) {
-                            // TV has no ACTION_SEND targets — share over the LAN + Downloads instead.
+                            // TV has no ACTION_SEND targets — use LAN sharing with optional Downloads.
                             tvDiagnosticsVisible = true
                         } else {
-                            DiagnosticsLog.share(context)
-                                .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                            scope.launch {
+                                DiagnosticsLog.share(context)
+                                    .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                            }
                         }
                     },
                 )

@@ -128,6 +128,9 @@ private fun deviceDefaultQuality(): DefaultQuality =
 /** No global server has been chosen yet; the launch route supplies the initial server. */
 const val DEFAULT_PREFERRED_PROVIDER = "auto"
 
+/** Shared safety limit for manually or persistently shifted captions. */
+const val MAX_CAPTION_DELAY_MS = 30_000L
+
 /** How many servers the user can rank. Beyond three, the catalog's own order takes over anyway. */
 const val MAX_SERVER_PRIORITY = 3
 
@@ -178,6 +181,9 @@ object SettingsStore {
     // the whole style at once, and a partial style is never meaningful.
     private val _captionStyle = MutableStateFlow(CaptionStyle())
     val captionStyle = _captionStyle.asStateFlow()
+
+    /** Opted-in subtitle delays keyed by AniList anime ID (which also scopes separate seasons). */
+    private val _persistentCaptionDelays = MutableStateFlow<Map<Int, Long>>(emptyMap())
 
     private val _menuLanguage = MutableStateFlow(MenuLanguage.SYSTEM)
     val menuLanguage = _menuLanguage.asStateFlow()
@@ -260,6 +266,19 @@ object SettingsStore {
     fun setCaptionTextColor(value: CaptionTextColor) = editCaptionStyle { it.copy(textColor = value) }
     fun setCaptionEdgeStyle(value: CaptionEdgeStyle) = editCaptionStyle { it.copy(edgeStyle = value) }
     fun resetCaptionStyle() = editCaptionStyle { CaptionStyle() }
+
+    fun persistentCaptionDelay(animeId: Int): Long? = _persistentCaptionDelays.value[animeId]
+
+    /** A missing entry means carryover is off for this anime/season; zero is a valid saved delay. */
+    fun setPersistentCaptionDelay(animeId: Int, delayMs: Long?) {
+        if (animeId <= 0) return
+        val next = _persistentCaptionDelays.value.toMutableMap().apply {
+            if (delayMs == null) remove(animeId)
+            else put(animeId, delayMs.coerceIn(-MAX_CAPTION_DELAY_MS, MAX_CAPTION_DELAY_MS))
+        }.toMap()
+        _persistentCaptionDelays.value = next
+        scope.launch { store.edit { it[PERSISTENT_CAPTION_DELAYS] = encodePersistentCaptionDelays(next) } }
+    }
 
     fun setDefaultQuality(value: DefaultQuality) {
         _defaultQuality.value = value
@@ -377,6 +396,7 @@ object SettingsStore {
         _subtitlesWithDub.value = prefs[SUBTITLES_WITH_DUB] ?: false
         _updateCheckOnLaunch.value = prefs[UPDATE_CHECK_ON_LAUNCH] ?: true
         _captionStyle.value = readCaptionStyle(prefs)
+        _persistentCaptionDelays.value = decodePersistentCaptionDelays(prefs[PERSISTENT_CAPTION_DELAYS])
         _menuLanguage.value = MenuLanguage.fromStored(prefs[MENU_LANGUAGE])
         _defaultQuality.value = prefs[DEFAULT_QUALITY]?.let(DefaultQuality::fromStored)
             ?: deviceDefaultQuality()
@@ -427,6 +447,7 @@ object SettingsStore {
     private val CAPTION_BOTTOM_MARGIN = intPreferencesKey("caption_bottom_margin")
     private val CAPTION_TEXT_COLOR = stringPreferencesKey("caption_text_color")
     private val CAPTION_EDGE_STYLE = stringPreferencesKey("caption_edge_style")
+    private val PERSISTENT_CAPTION_DELAYS = stringPreferencesKey("persistent_caption_delays")
     private val MENU_LANGUAGE = stringPreferencesKey("menu_language")
     private val DEFAULT_QUALITY = stringPreferencesKey("default_quality")
     private val DOWNLOAD_QUALITY = stringPreferencesKey("download_quality")
@@ -438,3 +459,26 @@ object SettingsStore {
     private val PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }
+
+internal fun encodePersistentCaptionDelays(delays: Map<Int, Long>): String = delays
+    .asSequence()
+    .filter { (animeId, _) -> animeId > 0 }
+    .sortedBy { (animeId, _) -> animeId }
+    .joinToString(",") { (animeId, delayMs) ->
+        "$animeId:${delayMs.coerceIn(-MAX_CAPTION_DELAY_MS, MAX_CAPTION_DELAY_MS)}"
+    }
+
+internal fun decodePersistentCaptionDelays(stored: String?): Map<Int, Long> = stored
+    .orEmpty()
+    .split(',')
+    .mapNotNull { entry ->
+        val separator = entry.indexOf(':')
+        if (separator <= 0 || separator == entry.lastIndex) return@mapNotNull null
+        val animeId = entry.substring(0, separator).toIntOrNull()?.takeIf { it > 0 }
+            ?: return@mapNotNull null
+        val delayMs = entry.substring(separator + 1).toLongOrNull()
+            ?.coerceIn(-MAX_CAPTION_DELAY_MS, MAX_CAPTION_DELAY_MS)
+            ?: return@mapNotNull null
+        animeId to delayMs
+    }
+    .toMap()

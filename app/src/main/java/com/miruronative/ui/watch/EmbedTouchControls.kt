@@ -1,7 +1,9 @@
 package com.miruronative.ui.watch
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Settings
@@ -26,7 +28,9 @@ internal fun EmbedTouchControls(
     onForward: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
+    onCaptions: () -> Unit,
     onSettings: () -> Unit,
+    onAddToList: (() -> Unit)? = null,
     onEpisodes: (() -> Unit)? = null,
     isFullscreen: Boolean = false,
     onFullscreen: (() -> Unit)? = null,
@@ -47,6 +51,18 @@ internal fun EmbedTouchControls(
         onSeek = onSeek,
         onInteract = onInteract,
         modifier = modifier,
+        topRightIcons = {
+            onAddToList?.let { openList ->
+                PlayerControlIconButton(
+                    "Add to My List",
+                    Icons.AutoMirrored.Filled.PlaylistAdd,
+                    onClick = {
+                        openList()
+                        onInteract()
+                    },
+                )
+            }
+        },
     ) {
         onEpisodes?.let { openEpisodes ->
             PlayerControlIconButton(
@@ -58,6 +74,14 @@ internal fun EmbedTouchControls(
                 },
             )
         }
+        PlayerControlIconButton(
+            "Captions",
+            Icons.Default.ClosedCaption,
+            onClick = {
+                onCaptions()
+                onInteract()
+            },
+        )
         PlayerControlIconButton(
             "Settings",
             Icons.Default.Settings,
@@ -78,4 +102,3 @@ internal fun EmbedTouchControls(
         }
     }
 }
-

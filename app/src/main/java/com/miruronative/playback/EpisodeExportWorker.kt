@@ -114,6 +114,7 @@ class EpisodeExportWorker(
                 // export already under way must not be restarted from zero each time.
                 ExistingWorkPolicy.KEEP,
                 OneTimeWorkRequestBuilder<EpisodeExportWorker>()
+                    .addTag("episode-export")
                     .setInputData(workDataOf(KEY_DOWNLOAD_ID to downloadId))
                     .build(),
             )

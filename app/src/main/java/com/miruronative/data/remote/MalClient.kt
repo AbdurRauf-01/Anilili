@@ -76,18 +76,22 @@ data class MalListEntry(
 class MalClient(
     private val client: OkHttpClient,
     private val json: Json,
+    apiBaseUrl: String = API,
+    private val accessTokenProvider: suspend () -> String? = MalAuthManager::freshAccessToken,
 ) {
+    private val apiBaseUrl = apiBaseUrl.trimEnd('/')
+
     suspend fun viewer(): MalUser = withContext(Dispatchers.IO) {
         json.decodeFromString(
             MalUser.serializer(),
-            get("$API/users/@me?fields=anime_statistics"),
+            get("$apiBaseUrl/users/@me?fields=anime_statistics"),
         )
     }
 
     /** The whole list in one call when possible (MAL allows limit up to 1000), else paged. */
     suspend fun animeList(): List<MalListEntry> = withContext(Dispatchers.IO) {
         val entries = mutableListOf<MalListEntry>()
-        var url: String? = "$API/users/@me/animelist" +
+        var url: String? = "$apiBaseUrl/users/@me/animelist" +
             "?fields=list_status,num_episodes&limit=1000&nsfw=true"
         var pages = 0
         while (url != null && pages < MAX_LIST_PAGES) {
@@ -113,7 +117,7 @@ class MalClient(
     suspend fun listStatus(malId: Int): MalListStatus? = withContext(Dispatchers.IO) {
         val parsed = json.decodeFromString(
             MalAnimeWithStatus.serializer(),
-            get("$API/anime/$malId?fields=my_list_status"),
+            get("$apiBaseUrl/anime/$malId?fields=my_list_status"),
         )
         parsed.myListStatus?.takeIf { it.status != null }
     }
@@ -124,19 +128,34 @@ class MalClient(
         progress: Int? = null,
         status: String? = null,
         isRewatching: Boolean? = null,
-    ) =
-        withContext(Dispatchers.IO) {
+    ): MalListStatus = withContext(Dispatchers.IO) {
             val body = FormBody.Builder().apply {
                 progress?.let { add("num_watched_episodes", it.toString()) }
                 status?.let { add("status", it) }
                 isRewatching?.let { add("is_rewatching", it.toString()) }
             }.build()
-            val request = authed("$API/anime/$malId/my_list_status").patch(body).build()
-            execute(request)
+            val request = authed("$apiBaseUrl/anime/$malId/my_list_status").patch(body).build()
+            val confirmed = json.decodeFromString(MalListStatus.serializer(), execute(request))
+            progress?.let { requested ->
+                check(confirmed.numEpisodesWatched == requested) {
+                    "MyAnimeList confirmed ${confirmed.numEpisodesWatched} watched episodes after requesting $requested"
+                }
+            }
+            status?.let { requested ->
+                check(confirmed.status == requested) {
+                    "MyAnimeList confirmed status ${confirmed.status ?: "missing"} after requesting $requested"
+                }
+            }
+            isRewatching?.let { requested ->
+                check(confirmed.isRewatching == requested) {
+                    "MyAnimeList confirmed is_rewatching=${confirmed.isRewatching} after requesting $requested"
+                }
+            }
+            confirmed
         }
 
     suspend fun deleteListEntry(malId: Int) = withContext(Dispatchers.IO) {
-        execute(authed("$API/anime/$malId/my_list_status").delete().build())
+        execute(authed("$apiBaseUrl/anime/$malId/my_list_status").delete().build())
     }
 
     // ---- helpers ----
@@ -144,7 +163,7 @@ class MalClient(
     private suspend fun get(url: String): String = execute(authed(url).get().build())
 
     private suspend fun authed(url: String): Request.Builder {
-        val token = MalAuthManager.freshAccessToken() ?: error("Not logged in to MyAnimeList")
+        val token = accessTokenProvider() ?: error("Not logged in to MyAnimeList")
         return Request.Builder().url(url.toHttpUrl()).header("Authorization", "Bearer $token")
     }
 

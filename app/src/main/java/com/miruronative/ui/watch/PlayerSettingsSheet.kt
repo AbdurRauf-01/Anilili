@@ -84,12 +84,9 @@ internal data class PlayerQualityOption(
 private val SheetColor = Color(0xFF1B1B1F)
 
 /**
- * The player's settings, as a bottom sheet styled to match the shared player chrome: volume,
- * playback speed, quality, and playback toggles. Every section is capability-gated — pass `null`
- * or an empty list and it isn't drawn — so the same sheet serves the native and embed players
- * without either showing a control it can't honor.
+ * The player's general playback settings. Subtitle controls deliberately live in
+ * [PlayerCaptionsSheet] so the CC button is their single, predictable entry point.
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun PlayerSettingsSheet(
     onDismiss: () -> Unit,
@@ -98,43 +95,87 @@ internal fun PlayerSettingsSheet(
     speed: Float? = null,
     onSpeedChange: (Float) -> Unit = {},
     qualityOptions: List<PlayerQualityOption> = emptyList(),
-    subtitleOptions: List<PlayerQualityOption> = emptyList(),
     audioOptions: List<PlayerQualityOption> = emptyList(),
     contentScale: PlayerContentScale? = null,
     onContentScaleChange: (PlayerContentScale) -> Unit = {},
-    onCaptionAppearance: (() -> Unit)? = null,
     autoSkip: Boolean? = null,
     onAutoSkipChange: (Boolean) -> Unit = {},
     skipTimingStatus: SkipTimingStatus? = null,
-    subtitleDelayMs: Long? = null,
-    onSubtitleDelayChange: (Long) -> Unit = {},
     onEnterPip: (() -> Unit)? = null,
 ) {
-    val sections: @Composable () -> Unit = {
+    PlayerOptionsSheet(
+        title = "Settings",
+        paneTitle = "Player settings",
+        closeDescription = "Close settings",
+        onDismiss = onDismiss,
+    ) {
         SheetSections(
             autoplay = autoplay,
             onAutoplayChange = onAutoplayChange,
             speed = speed,
             onSpeedChange = onSpeedChange,
             qualityOptions = qualityOptions,
-            subtitleOptions = subtitleOptions,
             audioOptions = audioOptions,
             contentScale = contentScale,
             onContentScaleChange = onContentScaleChange,
-            onCaptionAppearance = onCaptionAppearance,
             autoSkip = autoSkip,
             onAutoSkipChange = onAutoSkipChange,
             skipTimingStatus = skipTimingStatus,
-            subtitleDelayMs = subtitleDelayMs,
-            onSubtitleDelayChange = onSubtitleDelayChange,
             onEnterPip = onEnterPip,
         )
     }
+}
+
+/** All subtitle controls shown from the player's CC button. */
+@Composable
+internal fun PlayerCaptionsSheet(
+    onDismiss: () -> Unit,
+    subtitleOptions: List<PlayerQualityOption> = emptyList(),
+    emptyTrackMessage: String = "No subtitle tracks are available for this video.",
+    onCaptionAppearance: () -> Unit,
+    subtitleDelayMs: Long? = null,
+    onSubtitleDelayChange: (Long) -> Unit = {},
+    persistDelayAcrossEpisodes: Boolean? = null,
+    onPersistDelayAcrossEpisodesChange: (Boolean) -> Unit = {},
+) {
+    PlayerOptionsSheet(
+        title = "Captions",
+        paneTitle = "Caption settings",
+        closeDescription = "Close captions",
+        onDismiss = onDismiss,
+    ) {
+        CaptionSections(
+            subtitleOptions = subtitleOptions,
+            emptyTrackMessage = emptyTrackMessage,
+            onCaptionAppearance = onCaptionAppearance,
+            subtitleDelayMs = subtitleDelayMs,
+            onSubtitleDelayChange = onSubtitleDelayChange,
+            persistDelayAcrossEpisodes = persistDelayAcrossEpisodes,
+            onPersistDelayAcrossEpisodesChange = onPersistDelayAcrossEpisodesChange,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerOptionsSheet(
+    title: String,
+    paneTitle: String,
+    closeDescription: String,
+    onDismiss: () -> Unit,
+    sections: @Composable () -> Unit,
+) {
     // A ModalBottomSheet opens a second window, which the TV D-pad and TalkBack focus never
     // reliably enter — the remote keeps driving the player underneath. TV gets the same
     // sections as an in-window side panel instead, where standard Compose focus applies.
     if (LocalAppDeviceProfile.current.isTv) {
-        TvSettingsPanel(onDismiss, sections)
+        TvSettingsPanel(
+            title = title,
+            paneTitle = paneTitle,
+            closeDescription = closeDescription,
+            onDismiss = onDismiss,
+            content = sections,
+        )
         return
     }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -151,7 +192,7 @@ internal fun PlayerSettingsSheet(
                 .padding(start = 22.dp, end = 22.dp, bottom = 32.dp),
         ) {
             Text(
-                "Settings",
+                title,
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.titleLarge,
@@ -170,16 +211,12 @@ private fun SheetSections(
     speed: Float?,
     onSpeedChange: (Float) -> Unit,
     qualityOptions: List<PlayerQualityOption>,
-    subtitleOptions: List<PlayerQualityOption>,
     audioOptions: List<PlayerQualityOption>,
     contentScale: PlayerContentScale?,
     onContentScaleChange: (PlayerContentScale) -> Unit,
-    onCaptionAppearance: (() -> Unit)?,
     autoSkip: Boolean?,
     onAutoSkipChange: (Boolean) -> Unit,
     skipTimingStatus: SkipTimingStatus?,
-    subtitleDelayMs: Long?,
-    onSubtitleDelayChange: (Long) -> Unit,
     onEnterPip: (() -> Unit)?,
 ) {
     SectionLabel("Volume")
@@ -206,18 +243,6 @@ private fun SheetSections(
         }
     }
 
-    if (subtitleOptions.isNotEmpty()) {
-        SectionLabel("Subtitles")
-        subtitleOptions.forEach { option ->
-            TrackRow(option.label, option.selected, option.onSelect)
-        }
-    }
-
-    subtitleDelayMs?.let { current ->
-        SectionLabel("Subtitle Delay")
-        SubtitleDelayRow(current, onSubtitleDelayChange)
-    }
-
     contentScale?.let { current ->
         SectionLabel("Content Scale")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -225,11 +250,6 @@ private fun SheetSections(
                 ChoiceChip(scale.label, scale == current) { onContentScaleChange(scale) }
             }
         }
-    }
-
-    onCaptionAppearance?.let { open ->
-        SectionLabel("Captions")
-        ClickableRow("Caption appearance…", open)
     }
 
     SectionLabel("Playback")
@@ -248,6 +268,52 @@ private fun SheetSections(
     onEnterPip?.let { ClickableRow("Picture-in-Picture", it) }
 }
 
+@Composable
+private fun CaptionSections(
+    subtitleOptions: List<PlayerQualityOption>,
+    emptyTrackMessage: String,
+    onCaptionAppearance: () -> Unit,
+    subtitleDelayMs: Long?,
+    onSubtitleDelayChange: (Long) -> Unit,
+    persistDelayAcrossEpisodes: Boolean?,
+    onPersistDelayAcrossEpisodesChange: (Boolean) -> Unit,
+) {
+    SectionLabel("Subtitle track")
+    if (subtitleOptions.isEmpty()) {
+        Text(
+            text = emptyTrackMessage,
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White.copy(alpha = 0.68f),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    } else {
+        subtitleOptions.forEach { option ->
+            TrackRow(option.label, option.selected, option.onSelect)
+        }
+    }
+
+    SectionLabel("Appearance")
+    ClickableRow("Caption appearance…", onCaptionAppearance)
+
+    subtitleDelayMs?.let { current ->
+        SectionLabel("Subtitle delay")
+        SubtitleDelayRow(current, onSubtitleDelayChange)
+        persistDelayAcrossEpisodes?.let { persist ->
+            ToggleRow("Keep across episodes", persist, onPersistDelayAcrossEpisodesChange)
+            Text(
+                text = if (persist) {
+                    "This delay is saved for every episode in this anime/season."
+                } else {
+                    "Each episode will use its own provider timing."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.62f),
+                modifier = Modifier.padding(start = 16.dp, end = 12.dp, bottom = 6.dp),
+            )
+        }
+    }
+}
+
 /**
  * TV presentation of the player settings: an in-window right-side panel. Being in the player's
  * own window (unlike a ModalBottomSheet) means the D-pad and TalkBack traverse it like any other
@@ -255,7 +321,13 @@ private fun SheetSections(
  */
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
-private fun TvSettingsPanel(onDismiss: () -> Unit, content: @Composable () -> Unit) {
+private fun TvSettingsPanel(
+    title: String,
+    paneTitle: String,
+    closeDescription: String,
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit,
+) {
     BackHandler(onBack = onDismiss)
     val initialFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
@@ -279,7 +351,7 @@ private fun TvSettingsPanel(onDismiss: () -> Unit, content: @Composable () -> Un
                 .focusProperties { exit = { FocusRequester.Cancel } }
                 .focusGroup()
                 .verticalScroll(rememberScrollState())
-                .semantics { paneTitle = "Player settings" }
+                .semantics { this.paneTitle = paneTitle }
                 .padding(start = 22.dp, end = 22.dp, top = 16.dp, bottom = 32.dp),
         ) {
             Row(
@@ -288,7 +360,7 @@ private fun TvSettingsPanel(onDismiss: () -> Unit, content: @Composable () -> Un
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "Settings",
+                    title,
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleLarge,
@@ -299,7 +371,7 @@ private fun TvSettingsPanel(onDismiss: () -> Unit, content: @Composable () -> Un
                         .focusRequester(initialFocus)
                         .focusHighlight(RoundedCornerShape(24.dp)),
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "Close settings", tint = Color.White)
+                    Icon(Icons.Default.Close, contentDescription = closeDescription, tint = Color.White)
                 }
             }
             content()

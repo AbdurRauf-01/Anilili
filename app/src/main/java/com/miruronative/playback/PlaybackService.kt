@@ -136,6 +136,7 @@ class PlaybackService : MediaSessionService() {
             .onFailure { DiagnosticsLog.throwable("PlaybackService cast unavailable", it) }
             .getOrNull()
         activePlayer = player
+        PlaybackDiagnostics.attach(player)
         player.addListener(playbackListener(player))
         castPlayer?.let { it.addListener(playbackListener(it)) }
 

@@ -34,6 +34,32 @@ data class HistoryEntry(
 internal fun sortHistoryLatestFirst(entries: List<HistoryEntry>): List<HistoryEntry> =
     entries.sortedByDescending(HistoryEntry::updatedAt)
 
+/**
+ * Move Continue Watching past an episode that crossed the watched threshold.
+ *
+ * The current record is only changed when it still points at the episode being completed. This
+ * makes late player callbacks harmless after the row has already advanced to the next episode.
+ * A null result means the known final episode was completed and the row should be removed.
+ */
+internal fun historyAfterEpisodeWatched(
+    existing: HistoryEntry,
+    watchedEpisode: Double,
+    nextEpisode: Double?,
+    nextEpisodeTitle: String?,
+    seriesCompleted: Boolean,
+): HistoryEntry? {
+    if (existing.episodeNumber != watchedEpisode) return existing
+    if (seriesCompleted) return null
+    val next = nextEpisode?.takeIf { it > watchedEpisode } ?: return existing
+    return existing.copy(
+        episodeNumber = next,
+        episodeTitle = nextEpisodeTitle,
+        positionMs = 0,
+        durationMs = 0,
+        fromRemote = false,
+    )
+}
+
 /** A saved series the user wants to watch. */
 @Serializable
 data class WatchlistEntry(

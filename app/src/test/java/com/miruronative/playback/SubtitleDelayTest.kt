@@ -97,4 +97,20 @@ class SubtitleDelayTest {
         SubtitleDelay.set(0L, automatic = true)
         assertEquals(false, SubtitleDelay.isAutomatic)
     }
+
+    @Test
+    fun `an opted-in anime delay wins over each episode provider offset`() {
+        assertEquals(
+            SubtitleDelaySeed(delayMs = 750L, automatic = false),
+            subtitleDelaySeed(providerDelayMs = 4_000L, persistentDelayMs = 750L),
+        )
+    }
+
+    @Test
+    fun `without opt-in each episode keeps its provider measured offset`() {
+        assertEquals(
+            SubtitleDelaySeed(delayMs = 4_000L, automatic = true),
+            subtitleDelaySeed(providerDelayMs = 4_000L, persistentDelayMs = null),
+        )
+    }
 }

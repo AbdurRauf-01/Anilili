@@ -1,5 +1,5 @@
-import java.util.Properties
 import com.android.build.OutputFile
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -8,6 +8,17 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
+
+val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
+    ?.take(12)
+    ?: runCatching {
+        providers.exec {
+            commandLine("git", "rev-parse", "--short=12", "HEAD")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim()
+    }.getOrDefault("unknown").ifBlank { "unknown" }
+val appVersionCode = 50
+val appVersionName = "0.1.49"
 
 val keystoreProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -24,8 +35,9 @@ android {
         // Fire OS 5 devices (including the 1st/2nd-gen Fire TV Sticks) report API 22.
         minSdk = 22
         targetSdk = 36
-        versionCode = 50
-        versionName = "0.1.49"
+        versionCode = appVersionCode
+        versionName = appVersionName
+        buildConfigField("String", "GIT_SHA", "\"$diagnosticBuildSha\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -113,6 +125,17 @@ android {
     }
 }
 
+val archiveReleaseMapping by tasks.registering(Copy::class) {
+    dependsOn("minifyReleaseWithR8")
+    from(layout.buildDirectory.file("outputs/mapping/release/mapping.txt"))
+    into(layout.buildDirectory.dir("outputs/mapping-archive"))
+    rename("mapping.txt", "mapping-v$appVersionName-$appVersionCode-$diagnosticBuildSha.txt")
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy(archiveReleaseMapping)
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
 
@@ -159,6 +182,7 @@ dependencies {
     implementation(libs.androidx.tvprovider)
     implementation(libs.zxing.core)
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation("androidx.test:core-ktx:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

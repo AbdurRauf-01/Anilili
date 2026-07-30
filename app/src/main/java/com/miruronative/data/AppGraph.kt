@@ -9,6 +9,7 @@ import com.miruronative.data.remote.JikanClient
 import com.miruronative.data.remote.KonohaClient
 import com.miruronative.data.remote.MalClient
 import com.miruronative.data.remote.PipeClient
+import com.miruronative.diagnostics.DiagnosticsHttpEventListener
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Cache
@@ -43,6 +44,7 @@ object AppGraph {
         }
 
         httpClient = OkHttpClient.Builder()
+            .eventListenerFactory(DiagnosticsHttpEventListener.Factory)
             .cache(Cache(File(context.applicationContext.cacheDir, "http"), 50L * 1024 * 1024))
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)

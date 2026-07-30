@@ -20,6 +20,15 @@ class InPlayerEpisodeListTest {
     }
 
     @Test
+    fun tvPlayerControlOrderIncludesMyListAfterEpisodes() {
+        val controls = tvPlayerControlOrder(hasEpisodes = true, hasList = true)
+
+        assertEquals(TvPlayerControl.EPISODES, controls[5])
+        assertEquals(TvPlayerControl.MY_LIST, controls[6])
+        assertEquals(TvPlayerControl.MUTE, controls[7])
+    }
+
+    @Test
     fun episodeBlockIndexingLocatesCorrectBlockForInPlayerList() {
         val episodes = (1..250).map { number ->
             EpisodeItem(

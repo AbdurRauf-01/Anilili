@@ -7,7 +7,9 @@ import com.miruronative.data.AppGraph
 import com.miruronative.data.auth.AccountService
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.model.MediaListEntry
+import com.miruronative.data.remote.MalProgressSyncWorker
 import com.miruronative.data.settings.SettingsStore
+import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -95,6 +97,47 @@ object LibraryStore {
         val existing = _history.value.firstOrNull { it.anilistId == anilistId } ?: return
         if (existing.episodeNumber != episodeNumber) return
         upsertHistory(existing.copy(positionMs = positionMs, durationMs = durationMs))
+    }
+
+    /**
+     * Advance the local Continue Watching row as soon as playback counts an episode as watched.
+     * This is intentionally independent from account sync: local history remains correct even
+     * while offline, logged out, or when a remote service rejects an update.
+     */
+    fun markEpisodeWatched(
+        anilistId: Int,
+        watchedEpisode: Double,
+        nextEpisode: Double?,
+        nextEpisodeTitle: String?,
+        seriesCompleted: Boolean,
+    ) {
+        val existing = historyFor(anilistId) ?: return
+        val updated = historyAfterEpisodeWatched(
+            existing = existing,
+            watchedEpisode = watchedEpisode,
+            nextEpisode = nextEpisode,
+            nextEpisodeTitle = nextEpisodeTitle,
+            seriesCompleted = seriesCompleted,
+        )
+        if (updated == existing) return
+        if (updated == null) {
+            DiagnosticsLog.event(
+                "Continue Watching completed id=$anilistId episode=${existing.episodeLabel}",
+            )
+            // Prevent a still-stale remote CURRENT record from immediately recreating the row.
+            removeHistory(anilistId, dismissRemoteSeed = AccountService.active != null)
+        } else {
+            DiagnosticsLog.event(
+                "Continue Watching advanced id=$anilistId from=${existing.episodeLabel} " +
+                    "to=${updated.episodeLabel}",
+            )
+            upsertHistory(updated)
+        }
+    }
+
+    /** Persist MAL progress delivery across navigation, process death, and lost connectivity. */
+    fun enqueueMalProgressSync(anilistId: Int, progress: Int, totalEpisodes: Int?) {
+        MalProgressSyncWorker.enqueue(appContext, anilistId, progress, totalEpisodes)
     }
 
     fun historyFor(anilistId: Int): HistoryEntry? = _history.value.firstOrNull { it.anilistId == anilistId }

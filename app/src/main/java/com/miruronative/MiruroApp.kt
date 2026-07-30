@@ -21,6 +21,7 @@ import com.miruronative.data.reminder.AutomaticReleaseManager
 import com.miruronative.data.reminder.AniListNotificationPushManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.DiagnosticsSystemMonitor
 import com.miruronative.playback.EpisodeDownloads
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,9 +35,12 @@ class MiruroApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         DiagnosticsLog.init(this)
+        // Install before any other app work so initialization failures are captured synchronously.
+        CrashReporter.init(this)
         DiagnosticsLog.event("MiruroApp.onCreate start")
         DiagnosticsLog.installLifecycleCallbacks(this)
         DiagnosticsLog.startMainThreadWatchdog()
+        DiagnosticsLog.installApplicationStartInfoListener(this)
         DiagnosticsLog.snapshot(this, "MiruroApp.onCreate")
         DiagnosticsLog.event(
             "MiruroApp process=${currentProcessName() ?: "unknown"} pid=${Process.myPid()} " +
@@ -47,6 +51,7 @@ class MiruroApp : Application(), ImageLoaderFactory {
             DiagnosticsLog.event("MiruroApp diagnostics process; skipping normal app init")
             return
         }
+        DiagnosticsSystemMonitor.install(this)
         // Off the startup path deliberately. Opening Media3's download index scans the cache
         // directory and opens SQLite — measured at 211ms of the 440ms spent in onCreate on a TV
         // stick, with an empty cache, and it grows with the number of downloads. Nothing during
@@ -60,15 +65,7 @@ class MiruroApp : Application(), ImageLoaderFactory {
             runCatching { EpisodeDownloads.initialize(this@MiruroApp) }
                 .onFailure { DiagnosticsLog.throwable("EpisodeDownloads initialization failed", it) }
         }
-        if (BuildConfig.DEBUG) {
-            StrictMode.setThreadPolicy(
-                StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build(),
-            )
-            StrictMode.setVmPolicy(
-                StrictMode.VmPolicy.Builder().detectLeakedClosableObjects().penaltyLog().build(),
-            )
-        }
-        diagnosticsStep("CrashReporter.init") { CrashReporter.init(this) }
+        if (BuildConfig.DEBUG) configureStrictMode()
         diagnosticsStep("AppGraph.init") { AppGraph.init(this) }
         diagnosticsStep("LibraryStore.init") { LibraryStore.init(this) }
         diagnosticsStep("SearchHistoryStore.init") { com.miruronative.data.library.SearchHistoryStore.init(this) }
@@ -124,6 +121,27 @@ class MiruroApp : Application(), ImageLoaderFactory {
             DiagnosticsLog.throwable("$name failed after ${SystemClock.elapsedRealtime() - startedAt}ms", throwable)
             throw throwable
         }
+    }
+
+    private fun configureStrictMode() {
+        val threadPolicy = StrictMode.ThreadPolicy.Builder().detectAll()
+        val vmPolicy = StrictMode.VmPolicy.Builder().detectLeakedClosableObjects()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "anilili-strict-mode").apply { isDaemon = true }
+            }
+            threadPolicy.penaltyListener(executor) { violation ->
+                DiagnosticsLog.throwable("StrictMode thread violation", violation)
+            }
+            vmPolicy.penaltyListener(executor) { violation ->
+                DiagnosticsLog.throwable("StrictMode VM violation", violation)
+            }
+        } else {
+            threadPolicy.penaltyLog()
+            vmPolicy.penaltyLog()
+        }
+        StrictMode.setThreadPolicy(threadPolicy.build())
+        StrictMode.setVmPolicy(vmPolicy.build())
     }
 
     private fun isDiagnosticsProcess(): Boolean = currentProcessName() == "$packageName:diagnostics"

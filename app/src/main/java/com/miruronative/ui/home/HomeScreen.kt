@@ -62,6 +62,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -111,6 +112,7 @@ import com.miruronative.ui.components.LocalAppChromeBottomInset
 import com.miruronative.ui.components.PullRefreshContainer
 import com.miruronative.ui.components.ScrollAwareTopBar
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private const val HERO_AUTO_ADVANCE_MS = 7_000L
 
@@ -134,6 +136,7 @@ fun HomeScreen(
     val history by LibraryStore.history.collectAsState()
     val device = LocalAppDeviceProfile.current
     val context = androidx.compose.ui.platform.LocalContext.current
+    val diagnosticsScope = rememberCoroutineScope()
     var slowStartup by remember { mutableStateOf(false) }
     var diagnosticsMessage by remember { mutableStateOf<String?>(null) }
 
@@ -155,8 +158,10 @@ fun HomeScreen(
                         message = diagnosticsMessage,
                         onRetry = { vm.load(force = true) },
                         onShareDiagnostics = {
-                            DiagnosticsLog.share(context)
-                                .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                            diagnosticsScope.launch {
+                                DiagnosticsLog.share(context)
+                                    .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                            }
                         },
                         modifier = modifier.padding(top = 82.dp),
                     )
@@ -240,8 +245,10 @@ fun HomeScreen(
                         message = diagnosticsMessage,
                         onRetry = { vm.load(force = true) },
                         onShareDiagnostics = {
-                            DiagnosticsLog.share(context)
-                                .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                            diagnosticsScope.launch {
+                                DiagnosticsLog.share(context)
+                                    .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
+                            }
                         },
                         modifier = Modifier.padding(padding),
                     )

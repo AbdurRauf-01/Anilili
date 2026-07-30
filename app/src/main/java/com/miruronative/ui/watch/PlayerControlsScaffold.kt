@@ -60,12 +60,20 @@ internal fun PlayerControlsScaffold(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
     onInteract: () -> Unit = {},
+    topRightIcons: @Composable RowScope.() -> Unit = {},
     bottomRightIcons: @Composable RowScope.() -> Unit = {},
 ) {
     // While the thumb is held, the slider tracks the finger, not the once-a-second position
     // update; the seek is committed on release so playback doesn't lurch through drag samples.
     var scrubFraction by remember { mutableStateOf<Float?>(null) }
     Box(modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            content = topRightIcons,
+        )
         Row(
             modifier = Modifier.align(Alignment.Center),
             horizontalArrangement = Arrangement.spacedBy(24.dp),

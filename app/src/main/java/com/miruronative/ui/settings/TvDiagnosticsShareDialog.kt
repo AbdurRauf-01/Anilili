@@ -1,6 +1,11 @@
 package com.miruronative.ui.settings
 
+import android.Manifest
 import android.graphics.Bitmap
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +29,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -45,33 +52,57 @@ import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.diagnostics.DiagnosticsServer
 import com.miruronative.ui.adaptive.focusHighlight
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * TV replacement for the ACTION_SEND diagnostics share (TV has no share targets): serves the
- * snapshot over the local network with a QR code + typable address, and drops a copy into the
- * device's public Downloads. The server lives only while this dialog is showing.
+ * snapshot over the local network with a QR code + typable address. Saving a persistent copy to
+ * public Downloads is a separate, explicit action. The server lives only while this dialog shows.
  */
 @Composable
 fun TvDiagnosticsShareDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     var url by remember { mutableStateOf<String?>(null) }
+    var report by remember { mutableStateOf<File?>(null) }
     var downloadsPath by remember { mutableStateOf<String?>(null) }
+    var downloadsSaving by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val closeFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+
+    fun saveToDownloads() {
+        val currentReport = report ?: return
+        scope.launch {
+            downloadsSaving = true
+            errorMessage = null
+            withContext(Dispatchers.IO) {
+                DiagnosticsLog.saveToDownloads(context, currentReport)
+            }.onSuccess { downloadsPath = it }
+                .onFailure { errorMessage = it.message ?: "Couldn't save diagnostics" }
+            downloadsSaving = false
+        }
+    }
+
+    val storagePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) saveToDownloads() else errorMessage = "Storage permission is required on this Android version."
+    }
 
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
+        val snapshotResult = withContext(Dispatchers.IO) {
             runCatching { DiagnosticsLog.createShareSnapshot(context.applicationContext) }
-                .onSuccess { snapshot ->
-                    DiagnosticsServer.start(snapshot)
-                        .onSuccess { url = it }
-                        .onFailure { errorMessage = it.message ?: "Couldn't start the local server" }
-                    DiagnosticsLog.saveToDownloads(context, snapshot)
-                        .onSuccess { downloadsPath = it }
-                }
-                .onFailure { errorMessage = it.message ?: "Couldn't prepare diagnostics" }
         }
+        snapshotResult
+            .onSuccess { snapshot ->
+                report = snapshot
+                withContext(Dispatchers.IO) { DiagnosticsServer.start(snapshot) }
+                    .onSuccess { url = it }
+                    .onFailure { errorMessage = it.message ?: "Couldn't start the local server" }
+            }
+            .onFailure { errorMessage = it.message ?: "Couldn't prepare diagnostics" }
         runCatching { closeFocus.requestFocus() }
     }
     DisposableEffect(Unit) {
@@ -121,14 +152,44 @@ fun TvDiagnosticsShareDialog(onDismiss: () -> Unit) {
                 }
 
                 Spacer(Modifier.height(18.dp))
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .align(Alignment.End)
-                        .focusRequester(closeFocus)
-                        .focusHighlight(RoundedCornerShape(24.dp)),
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Close", fontWeight = FontWeight.Bold)
+                    Button(
+                        enabled = report != null && downloadsPath == null && !downloadsSaving,
+                        onClick = {
+                            val needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                                ) != PackageManager.PERMISSION_GRANTED
+                            if (needsPermission) {
+                                storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                            } else {
+                                saveToDownloads()
+                            }
+                        },
+                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                    ) {
+                        Text(
+                            when {
+                                downloadsSaving -> "Saving…"
+                                downloadsPath != null -> "Saved to Downloads"
+                                else -> "Save to Downloads"
+                            },
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Button(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .focusRequester(closeFocus)
+                            .focusHighlight(RoundedCornerShape(24.dp)),
+                    ) {
+                        Text("Close", fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -149,10 +210,11 @@ private fun ShareInstructions(url: String) {
             )
             Text("1. Connect your phone or computer to the same Wi-Fi network as this TV.")
             Text("2. Scan the QR code with your phone camera, or type the address into a browser.")
-            Text("3. The diagnostics file downloads automatically — send it to the developers, for example in the Telegram group linked in Settings.")
+            Text("3. Download the ZIP and send it to the developers, for example in the Telegram group linked in Settings.")
             Text(
-                "Only devices on your home network can reach this address, and sharing stops " +
-                    "when you close this dialog.",
+                "The address contains a private access token, expires after 10 minutes, and stops " +
+                    "working when you close this dialog. Common sensitive values are redacted; " +
+                    "Android native crash traces can contain low-level device or process details.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

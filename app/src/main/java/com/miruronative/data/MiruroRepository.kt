@@ -28,9 +28,11 @@ import com.miruronative.data.remote.JikanClient
 import com.miruronative.data.remote.KonohaClient
 import com.miruronative.data.remote.KonohaEpisode
 import com.miruronative.data.remote.MalClient
+import com.miruronative.data.remote.MalProgressSyncResult
+import com.miruronative.data.remote.MalProgressSyncSkipReason
 import com.miruronative.data.remote.MediaListProgressSnapshot
-import com.miruronative.data.remote.MediaListProgressUpdate
 import com.miruronative.data.remote.PipeClient
+import com.miruronative.data.remote.malProgressSkipReason
 import com.miruronative.data.remote.planMediaListProgressUpdate
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.settings.DEFAULT_PREFERRED_PROVIDER
@@ -453,20 +455,59 @@ class MiruroRepository(
         }
     }
 
-    /** Update MAL watched progress with the same non-regression policy as the AniList sync. */
+    /**
+     * Update MAL watched progress with the same non-regression policy as the AniList sync.
+     * Every no-op is explicit so callers can distinguish a missing mapping from already-synced
+     * progress, and [MalClient] verifies the PATCH response before this reports [Updated].
+     */
     suspend fun saveMalProgress(
         anilistId: Int,
         progress: Int,
         totalEpisodes: Int?,
-    ): MediaListProgressUpdate? {
-        val media = animeInfo(anilistId)
-        val malId = media?.idMal?.takeIf { it > 0 } ?: return null
-        val current = mal.listStatus(malId)?.let {
-            MediaListProgressSnapshot(id = malId, status = MalClient.anilistStatus(it), progress = it.numEpisodesWatched)
+    ): MalProgressSyncResult {
+        if (progress < 1) {
+            return MalProgressSyncResult.Skipped(
+                anilistId = anilistId,
+                targetProgress = progress,
+                reason = MalProgressSyncSkipReason.INVALID_PROGRESS,
+            )
         }
-        val update = planMediaListProgressUpdate(current, progress, totalEpisodes ?: media.episodes) ?: return null
-        mal.updateListStatus(malId, progress = update.progress, status = update.status?.let(MalClient::malStatus))
-        return update
+        val media = animeInfo(anilistId)
+        val malId = media?.idMal?.takeIf { it > 0 } ?: return MalProgressSyncResult.Skipped(
+            anilistId = anilistId,
+            targetProgress = progress,
+            reason = MalProgressSyncSkipReason.MISSING_MAL_ID,
+        )
+        val malCurrent = mal.listStatus(malId)
+        val current = malCurrent?.let {
+            MediaListProgressSnapshot(
+                id = malId,
+                status = MalClient.anilistStatus(it),
+                progress = it.numEpisodesWatched,
+            )
+        }
+        val update = planMediaListProgressUpdate(current, progress, totalEpisodes ?: media.episodes)
+            ?: return MalProgressSyncResult.Skipped(
+                anilistId = anilistId,
+                targetProgress = progress,
+                reason = malProgressSkipReason(current?.status, current?.progress, progress),
+                malId = malId,
+                remoteProgress = current?.progress,
+            )
+        val confirmed = mal.updateListStatus(
+            malId,
+            progress = update.progress,
+            status = update.status?.let(MalClient::malStatus),
+        )
+        return MalProgressSyncResult.Updated(
+            anilistId = anilistId,
+            targetProgress = progress,
+            malId = malId,
+            previousProgress = malCurrent?.numEpisodesWatched,
+            confirmedProgress = confirmed.numEpisodesWatched,
+            status = update.status,
+            confirmedStatus = confirmed.status,
+        )
     }
 
     /** MAL filler episode numbers via Jikan; cached a week, empty on failure or no MAL id. */

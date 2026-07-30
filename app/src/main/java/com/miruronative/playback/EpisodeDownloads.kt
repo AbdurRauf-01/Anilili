@@ -37,6 +37,7 @@ import com.miruronative.data.settings.DownloadQuality
 import com.miruronative.MainActivity
 import com.miruronative.R
 import com.miruronative.diagnostics.DiagnosticsLog
+import com.miruronative.diagnostics.DiagnosticsHttpEventListener
 import com.miruronative.ui.nav.Routes
 import java.io.File
 import java.io.IOException
@@ -162,6 +163,7 @@ object EpisodeDownloads {
     private lateinit var manager: DownloadManager
     private lateinit var userAgent: String
     private val subtitleClient = OkHttpClient.Builder()
+        .eventListenerFactory(DiagnosticsHttpEventListener.Factory)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()

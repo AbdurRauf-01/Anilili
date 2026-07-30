@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.ClosedCaption
@@ -103,6 +104,7 @@ import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.PlaybackService
 import com.miruronative.playback.EpisodeDownloads
 import com.miruronative.playback.SubtitleDelay
+import com.miruronative.playback.subtitleDelaySeed
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
@@ -232,15 +234,21 @@ fun PlayerSurface(
     episodes: List<EpisodeItem> = emptyList(),
     currentIndex: Int = 0,
     onSelectEpisode: ((Int) -> Unit)? = null,
+    onAddToList: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
     val playerGestures by SettingsStore.playerGestures.collectAsState()
     DisposableEffect(Unit) { onDispose { resetPlayerBrightness(context) } }
-    // Each episode starts from what the loader measured for this stream, so a shift the viewer
-    // dialled in for a broken one never follows them into the next.
-    LaunchedEffect(stream.url, subtitleOffsetMs) {
-        SubtitleDelay.set(subtitleOffsetMs, automatic = true)
+    var persistCaptionDelayAcrossEpisodes by remember(animeId) { mutableStateOf(false) }
+    // By default every episode starts from its provider-measured offset. An explicit per-anime
+    // opt-in replaces that seed, including after process death and when the player changes source.
+    LaunchedEffect(animeId, episode, stream.url, subtitleOffsetMs) {
+        SettingsStore.awaitLoaded()
+        val persistentDelayMs = SettingsStore.persistentCaptionDelay(animeId)
+        persistCaptionDelayAcrossEpisodes = persistentDelayMs != null
+        val seed = subtitleDelaySeed(subtitleOffsetMs, persistentDelayMs)
+        SubtitleDelay.set(seed.delayMs, automatic = seed.automatic)
     }
     val subtitleDelayMs by SubtitleDelay.delayMs.collectAsState()
     val controllerFuture = remember(context) {
@@ -573,6 +581,7 @@ fun PlayerSurface(
     }
     val screenReaderActive = rememberScreenReaderActive()
     var settingsExpanded by remember { mutableStateOf(false) }
+    var captionsExpanded by remember { mutableStateOf(false) }
     var captionAppearanceVisible by remember { mutableStateOf(false) }
     // TalkBack users can't discover the hidden control row through a key press, so present it
     // as soon as the fullscreen player opens instead of waiting for the semantic reveal action.
@@ -587,6 +596,7 @@ fun PlayerSurface(
         focusPlayerOnStart,
         screenReaderActive,
         settingsExpanded,
+        captionsExpanded,
         captionAppearanceVisible,
     ) {
         if (!focusPlayerOnStart) {
@@ -600,7 +610,7 @@ fun PlayerSurface(
         // While the settings panel or caption dialog is up, the row must not vanish behind it:
         // hiding re-arms the "any key reopens controls" interceptor, which would then swallow
         // the panel's D-pad input and yank focus back to play/pause.
-        if (settingsExpanded || captionAppearanceVisible) return@LaunchedEffect
+        if (settingsExpanded || captionsExpanded || captionAppearanceVisible) return@LaunchedEffect
         delay(8_000)
         tvControlsVisible = false
         runCatching { tvPlayerFocus.requestFocus() }
@@ -823,7 +833,7 @@ fun PlayerSurface(
                 if (!opensTvPlayerControls(event.key)) return@onPreviewKeyEvent false
                 // Preview handlers on this root run before the focused child sees the key, so
                 // while an overlay owns the remote its input must pass through untouched.
-                if (settingsExpanded || captionAppearanceVisible) return@onPreviewKeyEvent false
+                if (settingsExpanded || captionsExpanded || captionAppearanceVisible) return@onPreviewKeyEvent false
                 tvControlsInteraction++
                 if (!tvControlsVisible) {
                     DiagnosticsLog.event("PlayerSurface TV controls opened key=${event.key}")
@@ -1008,6 +1018,18 @@ fun PlayerSurface(
                     phoneControlsInteraction++
                 },
                 onInteract = { phoneControlsInteraction++ },
+                topRightIcons = {
+                    onAddToList?.let { openList ->
+                        PlayerControlIconButton(
+                            "Add to My List",
+                            Icons.AutoMirrored.Filled.PlaylistAdd,
+                            onClick = {
+                                openList()
+                                phoneControlsInteraction++
+                            },
+                        )
+                    }
+                },
             ) {
                 if (episodes.isNotEmpty() && onSelectEpisode != null) {
                     PlayerControlIconButton(
@@ -1020,10 +1042,10 @@ fun PlayerSurface(
                     )
                 }
                 PlayerControlIconButton(
-                    "Subtitles",
+                    "Captions",
                     Icons.Default.ClosedCaption,
                     onClick = {
-                        controller?.let { toggleSubtitles(context, it, trackNameProvider) }
+                        captionsExpanded = true
                         phoneControlsInteraction++
                     },
                 )
@@ -1074,6 +1096,34 @@ fun PlayerSurface(
             } else {
                 emptyList()
             }
+            PlayerSettingsSheet(
+                onDismiss = {
+                    settingsExpanded = false
+                    restoreTvControlsFocus()
+                },
+                autoplay = autoplay,
+                onAutoplayChange = SettingsStore::setAutoplay,
+                speed = activeController.playbackParameters.speed,
+                onSpeedChange = { activeController.setPlaybackSpeed(it) },
+                qualityOptions = qualityOptions,
+                audioOptions = audioOptions,
+                contentScale = contentScale,
+                onContentScaleChange = { scale ->
+                    contentScale = scale
+                    playerView?.resizeMode = when (scale) {
+                        PlayerContentScale.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        PlayerContentScale.CROP -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        PlayerContentScale.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                    }
+                },
+                autoSkip = autoSkipIntroOutro,
+                onAutoSkipChange = SettingsStore::setAutoSkipIntroOutro,
+                skipTimingStatus = skipTimingStatus,
+            )
+        }
+
+        if (captionsExpanded && controller != null) {
+            val activeController = controller!!
             val subtitleTracks = trackOptions(activeController, trackNameProvider, C.TRACK_TYPE_TEXT)
             val subtitleOptions = if (subtitleTracks.isNotEmpty()) {
                 buildList {
@@ -1089,36 +1139,31 @@ fun PlayerSurface(
             } else {
                 emptyList()
             }
-            PlayerSettingsSheet(
+            PlayerCaptionsSheet(
                 onDismiss = {
-                    settingsExpanded = false
+                    captionsExpanded = false
                     restoreTvControlsFocus()
                 },
-                autoplay = autoplay,
-                onAutoplayChange = SettingsStore::setAutoplay,
-                speed = activeController.playbackParameters.speed,
-                onSpeedChange = { activeController.setPlaybackSpeed(it) },
-                qualityOptions = qualityOptions,
                 subtitleOptions = subtitleOptions,
-                audioOptions = audioOptions,
-                contentScale = contentScale,
-                onContentScaleChange = { scale ->
-                    contentScale = scale
-                    playerView?.resizeMode = when (scale) {
-                        PlayerContentScale.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        PlayerContentScale.CROP -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                        PlayerContentScale.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                    }
-                },
                 onCaptionAppearance = {
-                    settingsExpanded = false
+                    captionsExpanded = false
                     captionAppearanceVisible = true
                 },
                 subtitleDelayMs = subtitleDelayMs.takeIf { subtitleOptions.size > 1 },
-                onSubtitleDelayChange = { SubtitleDelay.set(it) },
-                autoSkip = autoSkipIntroOutro,
-                onAutoSkipChange = SettingsStore::setAutoSkipIntroOutro,
-                skipTimingStatus = skipTimingStatus,
+                onSubtitleDelayChange = { requestedDelayMs ->
+                    SubtitleDelay.set(requestedDelayMs)
+                    if (persistCaptionDelayAcrossEpisodes) {
+                        SettingsStore.setPersistentCaptionDelay(animeId, SubtitleDelay.delayMs.value)
+                    }
+                },
+                persistDelayAcrossEpisodes = persistCaptionDelayAcrossEpisodes,
+                onPersistDelayAcrossEpisodesChange = { persist ->
+                    persistCaptionDelayAcrossEpisodes = persist
+                    SettingsStore.setPersistentCaptionDelay(
+                        animeId = animeId,
+                        delayMs = SubtitleDelay.delayMs.value.takeIf { persist },
+                    )
+                },
             )
         }
 
@@ -1178,12 +1223,22 @@ fun PlayerSurface(
                     DiagnosticsLog.event("PlayerSurface TV control settings")
                     settingsExpanded = true
                 },
+                onCaptions = {
+                    DiagnosticsLog.event("PlayerSurface TV control captions")
+                    captionsExpanded = true
+                },
                 onEpisodes = if (episodes.isNotEmpty() && onSelectEpisode != null) {
                     {
                         DiagnosticsLog.event("PlayerSurface TV control episodes")
                         episodeDrawerExpanded = true
                     }
                 } else null,
+                onAddToList = onAddToList?.let { openList ->
+                    {
+                        DiagnosticsLog.event("PlayerSurface TV control myList")
+                        openList()
+                    }
+                },
                 onFullscreen = onToggleFullscreen,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1269,19 +1324,6 @@ private fun togglePlayerPlayback(controller: MediaController): Boolean {
 }
 
 internal fun playerToggleWillPlay(playWhenReady: Boolean): Boolean = !playWhenReady
-
-/** Quick subtitle on/off for the control bar's CC button; full track choice lives in the sheet. */
-@OptIn(UnstableApi::class)
-private fun toggleSubtitles(
-    context: Context,
-    controller: MediaController,
-    trackNameProvider: DefaultTrackNameProvider,
-) {
-    val tracks = trackOptions(controller, trackNameProvider, C.TRACK_TYPE_TEXT)
-    if (tracks.isEmpty()) return
-    if (tracks.any { it.selected }) applyTextTrack(context, controller, null)
-    else applyTextTrack(context, controller, tracks.first())
-}
 
 /**
  * The Cast button as a Compose element. Media3's own controller is off, so we inflate the

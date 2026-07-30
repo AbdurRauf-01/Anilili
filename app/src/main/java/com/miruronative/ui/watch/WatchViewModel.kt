@@ -142,7 +142,8 @@ class WatchViewModel : ViewModel() {
     private var popularity: Int? = null
     private var description: String? = null
     private var totalEpisodes: Int? = null
-    private val syncedAniListEpisodes = mutableSetOf<Int>()
+    private val locallyWatchedEpisodes = mutableSetOf<Int>()
+    private val scheduledRemoteProgressEpisodes = mutableSetOf<Int>()
     private var lastRequestedNumber = 1.0
     private var failedProviders = mutableSetOf<String>()
     private val unavailableSources = mutableSetOf<EpisodeSourceKey>()
@@ -188,7 +189,8 @@ class WatchViewModel : ViewModel() {
         averageScore = null
         popularity = null
         description = null
-        syncedAniListEpisodes.clear()
+        locallyWatchedEpisodes.clear()
+        scheduledRemoteProgressEpisodes.clear()
         failedProviders.clear()
         unavailableSources.clear()
         confirmedSources.clear()
@@ -659,6 +661,7 @@ class WatchViewModel : ViewModel() {
         lastKnownDurationMs = durationMs
         lastKnownNumber = data.current.number
         maybeLoadSkipTiming(data, durationMs)
+        maybeAdvanceContinueWatching(data, positionMs, durationMs)
         maybeSyncAniListProgress(data.current.number, positionMs, durationMs)
         val now = System.currentTimeMillis()
         if (now - lastProgressSave < 8_000) return
@@ -755,25 +758,58 @@ class WatchViewModel : ViewModel() {
         if (!SettingsStore.autoSyncAniList.value) return
         if (!shouldSyncAniListProgress(episodeNumber, positionMs, durationMs)) return
         val episode = episodeNumber.toInt()
-        if (!syncedAniListEpisodes.add(episode)) return
-        viewModelScope.launch {
-            runCatching {
-                when (service) {
-                    AccountService.ANILIST -> repo.saveAniListProgress(anilistId, episode, totalEpisodes)
-                    AccountService.MAL -> repo.saveMalProgress(anilistId, episode, totalEpisodes)
-                }
+        if (!scheduledRemoteProgressEpisodes.add(episode)) return
+        when (service) {
+            AccountService.MAL -> runCatching {
+                LibraryStore.enqueueMalProgressSync(anilistId, episode, totalEpisodes)
+            }.onFailure { error ->
+                scheduledRemoteProgressEpisodes.remove(episode)
+                DiagnosticsLog.throwable(
+                    "Watch MAL progress enqueue failed id=$anilistId episode=${fmt(episodeNumber)}",
+                    error,
+                )
             }
-                .onSuccess { update ->
-                    update?.status?.let { LibraryStore.updateRemoteStatus(anilistId, it) }
+            AccountService.ANILIST -> viewModelScope.launch {
+                runCatching {
+                    repo.saveAniListProgress(anilistId, episode, totalEpisodes)
                 }
-                .onFailure {
-                    syncedAniListEpisodes.remove(episode)
-                    DiagnosticsLog.throwable(
-                        "Watch ${service.label} progress sync failed id=$anilistId episode=${fmt(episodeNumber)}",
-                        it,
-                    )
-                }
+                    .onSuccess { update ->
+                        update?.status?.let { LibraryStore.updateRemoteStatus(anilistId, it) }
+                        DiagnosticsLog.event(
+                            "AniList progress sync ${if (update == null) "skipped" else "confirmed"} " +
+                                "id=$anilistId episode=$episode",
+                        )
+                    }
+                    .onFailure { error ->
+                        scheduledRemoteProgressEpisodes.remove(episode)
+                        DiagnosticsLog.throwable(
+                            "Watch AniList progress sync failed id=$anilistId " +
+                                "episode=${fmt(episodeNumber)}",
+                            error,
+                        )
+                    }
+            }
         }
+    }
+
+    /**
+     * Keep the local row aligned with what the viewer actually finished, regardless of whether
+     * AniList/MAL syncing is enabled or currently reachable.
+     */
+    private fun maybeAdvanceContinueWatching(data: WatchData, positionMs: Long, durationMs: Long) {
+        val watchedNumber = data.current.number
+        if (!shouldSyncAniListProgress(watchedNumber, positionMs, durationMs)) return
+        val episode = watchedNumber.toInt()
+        if (!locallyWatchedEpisodes.add(episode)) return
+        val next = data.episodes.getOrNull(data.currentIndex + 1)
+        val seriesCompleted = totalEpisodes?.takeIf { it > 0 }?.let { episode >= it } == true
+        LibraryStore.markEpisodeWatched(
+            anilistId = anilistId,
+            watchedEpisode = watchedNumber,
+            nextEpisode = next?.number,
+            nextEpisodeTitle = next?.distinctTitle,
+            seriesCompleted = seriesCompleted,
+        )
     }
 
     fun playIndex(index: Int) {

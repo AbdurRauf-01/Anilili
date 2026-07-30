@@ -5,11 +5,13 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.view.KeyEvent
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +30,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -315,31 +319,60 @@ fun LoginWebView(
     var webView by remember(authorizeUrl) { mutableStateOf<WebView?>(null) }
     var tvEditor by remember(authorizeUrl) { mutableStateOf<TvWebField?>(null) }
     var pageLoading by remember(authorizeUrl) { mutableStateOf(true) }
-    var loadProblem by remember(authorizeUrl) { mutableStateOf<String?>(null) }
+    var loadProblem by remember(authorizeUrl) { mutableStateOf<LoginLoadProblem?>(null) }
+    var factoryAttempt by remember(authorizeUrl) { mutableIntStateOf(0) }
 
-    LaunchedEffect(authorizeUrl, webView, pageLoading) {
-        val activeWebView = webView ?: return@LaunchedEffect
+    BackHandler {
+        when {
+            tvEditor != null -> tvEditor = null
+            webView?.canGoBack() == true -> webView?.goBack()
+            else -> onCancel()
+        }
+    }
+
+    LaunchedEffect(authorizeUrl, pageLoading, factoryAttempt) {
         if (!pageLoading) return@LaunchedEffect
         kotlinx.coroutines.delay(LOGIN_LOAD_TIMEOUT_MS)
-        if (pageLoading && activeWebView.isAttachedToWindow) {
+        if (pageLoading) {
+            val activeWebView = webView?.takeIf { it.isAttachedToWindow }
             DiagnosticsLog.event(
-                "LoginWebView load timeout host=${activeWebView.url.oauthHost()} " +
-                    "progress=${activeWebView.progress} title=${activeWebView.title ?: "none"}",
+                category = "auth",
+                name = "oauth.load_timeout",
+                attributes = mapOf(
+                    "host" to (activeWebView?.url ?: authorizeUrl).oauthHost(),
+                    "hasWebView" to (activeWebView != null),
+                    "attached" to (activeWebView?.isAttachedToWindow == true),
+                    "progress" to (activeWebView?.progress ?: 0),
+                    "title" to (activeWebView?.title ?: "none"),
+                ),
             )
-            loadProblem = "The login page is taking too long to open."
+            pageLoading = false
+            loadProblem = if (activeWebView == null) {
+                LoginLoadProblem.WEBVIEW_UNAVAILABLE
+            } else {
+                LoginLoadProblem.TIMEOUT
+            }
         }
     }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    try {
-                        var tokenHandled = false
-                        WebView(ctx).apply {
-                            DiagnosticsLog.event("LoginWebView factory create start")
+            key(authorizeUrl, factoryAttempt) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        try {
+                            DiagnosticsLog.event(
+                                category = "auth",
+                                name = "oauth.webview_create",
+                                attributes = mapOf(
+                                    "host" to authorizeUrl.oauthHost(),
+                                    "attempt" to (factoryAttempt + 1),
+                                ),
+                            )
                             DiagnosticsLog.webViewPackage("LoginWebView factory")
+                            var tokenHandled = false
+                            WebView(ctx).apply {
                             webView = this
                             isFocusable = true
                             isFocusableInTouchMode = true
@@ -347,6 +380,39 @@ fun LoginWebView(
                             settings.domStorageEnabled = true
                             settings.allowFileAccess = false
                             settings.allowContentAccess = false
+                            fun markPageUsable(view: WebView?, url: String?, signal: String) {
+                                if (url == null || url == "about:blank") return
+                                val wasLoading = pageLoading || loadProblem != null
+                                pageLoading = false
+                                loadProblem = null
+                                if (wasLoading) {
+                                    DiagnosticsLog.event(
+                                        category = "auth",
+                                        name = "oauth.page_usable",
+                                        attributes = mapOf(
+                                            "host" to url.oauthHost(),
+                                            "signal" to signal,
+                                            "progress" to (view?.progress ?: 0),
+                                        ),
+                                    )
+                                }
+                                if (device.isTv) {
+                                    view?.evaluateJavascript(TV_EDITOR_JS) {
+                                        view.postDelayed({
+                                            if (view.isAttachedToWindow) {
+                                                view.evaluateJavascript(TV_FOCUS_FIRST_JS, null)
+                                            }
+                                        }, 180)
+                                    }
+                                }
+                            }
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    if (isLoginPageUsableProgress(newProgress)) {
+                                        markPageUsable(view, view?.url, "progress")
+                                    }
+                                }
+                            }
                             webViewClient = object : WebViewClient() {
                                 private fun handleRedirect(view: WebView?, url: String?): Boolean {
                                     if (tokenHandled || url == null || !isRedirect(url)) return false
@@ -381,21 +447,15 @@ fun LoginWebView(
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     if (url == "about:blank") return
-                                    pageLoading = false
-                                    loadProblem = null
+                                    markPageUsable(view, url, "finished")
                                     DiagnosticsLog.event(
                                         "LoginWebView page finished host=${url.oauthHost()} " +
                                             "title=${view?.title ?: "none"}",
                                     )
-                                    if (device.isTv) {
-                                        view?.evaluateJavascript(TV_EDITOR_JS) {
-                                            view.postDelayed({
-                                                if (view.isAttachedToWindow) {
-                                                    view.evaluateJavascript(TV_FOCUS_FIRST_JS, null)
-                                                }
-                                            }, 180)
-                                        }
-                                    }
+                                }
+
+                                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                    markPageUsable(view, url, "commit_visible")
                                 }
 
                                 override fun onReceivedError(
@@ -405,7 +465,7 @@ fun LoginWebView(
                                 ) {
                                     if (request?.isForMainFrame != true) return
                                     pageLoading = false
-                                    loadProblem = "Couldn't open the login page."
+                                    loadProblem = LoginLoadProblem.NETWORK
                                     val details =
                                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                                             "code=${error?.errorCode ?: 0} " +
@@ -426,7 +486,7 @@ fun LoginWebView(
                                 ) {
                                     if (request?.isForMainFrame != true) return
                                     pageLoading = false
-                                    loadProblem = "The login service returned an error."
+                                    loadProblem = LoginLoadProblem.HTTP
                                     DiagnosticsLog.event(
                                         "LoginWebView main frame HTTP error " +
                                             "host=${request.url?.host ?: "none"} " +
@@ -458,38 +518,60 @@ fun LoginWebView(
                             DiagnosticsLog.event(
                                 "LoginWebView load requested host=${authorizeUrl.oauthHost()}",
                             )
-                            if (device.isTv) post { requestFocus() }
+                                if (device.isTv) post { requestFocus() }
+                            }
+                        } catch (e: Throwable) {
+                            pageLoading = false
+                            loadProblem = LoginLoadProblem.WEBVIEW_UNAVAILABLE
+                            DiagnosticsLog.event(
+                                category = "auth",
+                                name = "oauth.webview_unavailable",
+                                attributes = mapOf(
+                                    "host" to authorizeUrl.oauthHost(),
+                                    "attempt" to (factoryAttempt + 1),
+                                    "errorType" to e.javaClass.simpleName,
+                                    "message" to (e.message ?: "none"),
+                                ),
+                            )
+                            CrashReporter.logNonFatal("System WebView unavailable; login disabled", e)
+                            android.view.View(ctx)
                         }
-                    } catch (e: Throwable) {
-                        CrashReporter.logNonFatal("System WebView unavailable; login disabled", e)
-                        android.view.View(ctx)
-                    }
-                },
-                onRelease = { view ->
-                    val web = view as? WebView ?: return@AndroidView
-                    if (webView === web) webView = null
-                    tvEditor = null
-                    DiagnosticsLog.event(
-                        "LoginWebView release host=${web.url.oauthHost()} size=${web.width}x${web.height}",
-                    )
-                    web.stopLoading()
-                    web.loadUrl("about:blank")
-                    web.clearHistory()
-                    web.removeAllViews()
-                    WebViewProcessController.release(web, "account-login")
-                    web.destroy()
-                },
-            )
+                    },
+                    onRelease = { view ->
+                        val web = view as? WebView ?: return@AndroidView
+                        if (webView === web) webView = null
+                        tvEditor = null
+                        DiagnosticsLog.event(
+                            "LoginWebView release host=${web.url.oauthHost()} size=${web.width}x${web.height}",
+                        )
+                        web.stopLoading()
+                        web.loadUrl("about:blank")
+                        web.clearHistory()
+                        web.removeAllViews()
+                        WebViewProcessController.release(web, "account-login")
+                        web.destroy()
+                    },
+                )
+            }
             if (pageLoading || loadProblem != null) {
                 LoginLoadStatus(
                     problem = loadProblem,
                     onRetry = {
-                        val activeWebView = webView ?: return@LoginLoadStatus
+                        val activeWebView = webView?.takeIf { it.isAttachedToWindow }
                         DiagnosticsLog.event(
-                            "LoginWebView retry host=${activeWebView.url.oauthHost()}",
+                            category = "auth",
+                            name = "oauth.retry",
+                            attributes = mapOf(
+                                "host" to (activeWebView?.url ?: authorizeUrl).oauthHost(),
+                                "recreateWebView" to (activeWebView == null),
+                            ),
                         )
                         pageLoading = true
                         loadProblem = null
+                        if (activeWebView == null) {
+                            factoryAttempt++
+                            return@LoginLoadStatus
+                        }
                         activeWebView.stopLoading()
                         activeWebView.loadUrl("about:blank")
                         activeWebView.postDelayed({
@@ -559,7 +641,7 @@ fun LoginWebView(
 
 @Composable
 private fun LoginLoadStatus(
-    problem: String?,
+    problem: LoginLoadProblem?,
     onRetry: () -> Unit,
 ) {
     Surface(
@@ -582,12 +664,12 @@ private fun LoginLoadStatus(
                 )
             } else {
                 Text(
-                    text = problem,
+                    text = problem.title,
                     style = MaterialTheme.typography.titleLarge,
                     textAlign = TextAlign.Center,
                 )
                 Text(
-                    text = "Check your connection, then try again.",
+                    text = problem.guidance,
                     modifier = Modifier.padding(top = 8.dp, bottom = 20.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -600,9 +682,35 @@ private fun LoginLoadStatus(
     }
 }
 
+internal enum class LoginLoadProblem(
+    val title: String,
+    val guidance: String,
+) {
+    TIMEOUT(
+        title = "The login page is taking too long to open.",
+        guidance = "Check your connection, then try again.",
+    ),
+    NETWORK(
+        title = "Couldn't open the login page.",
+        guidance = "Check your connection, private DNS, or VPN, then try again.",
+    ),
+    HTTP(
+        title = "The login service returned an error.",
+        guidance = "The service may be temporarily unavailable. Try again shortly.",
+    ),
+    WEBVIEW_UNAVAILABLE(
+        title = "Secure login isn't available on this device.",
+        guidance = "Install or enable Android System WebView, then restart Anilili and try again.",
+    ),
+}
+
 private fun String?.oauthHost(): String =
     this?.let { value -> runCatching { android.net.Uri.parse(value).host }.getOrNull() }
         ?: "none"
 
-private const val LOGIN_LOAD_TIMEOUT_MS = 12_000L
+internal fun isLoginPageUsableProgress(progress: Int): Boolean =
+    progress >= LOGIN_USABLE_PROGRESS
+
+private const val LOGIN_LOAD_TIMEOUT_MS = 20_000L
 private const val LOGIN_RETRY_DELAY_MS = 180L
+private const val LOGIN_USABLE_PROGRESS = 85

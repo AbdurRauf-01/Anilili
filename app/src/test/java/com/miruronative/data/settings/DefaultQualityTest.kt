@@ -28,6 +28,17 @@ class DefaultQualityTest {
     }
 
     @Test
+    fun `data saver picks 360p when available`() {
+        assertEquals(360, DefaultQuality.P360.pickHeight(listOf(1080, 720, 480, 360)))
+        assertEquals(360, DefaultQuality.P360.maxHeight)
+    }
+
+    @Test
+    fun `data saver uses lowest server rendition when 360p is unavailable`() {
+        assertEquals(480, DefaultQuality.P360.pickHeight(listOf(1080, 720, 480)))
+    }
+
+    @Test
     fun `stored values round-trip and unknown falls back to highest`() {
         DefaultQuality.entries.forEach { quality ->
             assertEquals(quality, DefaultQuality.fromStored(quality.storedValue))

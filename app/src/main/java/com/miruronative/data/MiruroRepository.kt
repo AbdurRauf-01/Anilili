@@ -32,6 +32,7 @@ import com.miruronative.data.remote.MalProgressSyncResult
 import com.miruronative.data.remote.MalProgressSyncSkipReason
 import com.miruronative.data.remote.MediaListProgressSnapshot
 import com.miruronative.data.remote.PipeClient
+import com.miruronative.data.remote.PipeBridge
 import com.miruronative.data.remote.malProgressSkipReason
 import com.miruronative.data.remote.planMediaListProgressUpdate
 import com.miruronative.data.settings.SettingsStore
@@ -779,6 +780,12 @@ class MiruroRepository(
         allowInteractiveChallenges: Boolean = true,
     ): SourceResolution {
         val interactiveAllAnime = allowInteractiveChallenges && preferred.equals("allanime", ignoreCase = true)
+        fun attemptTimeoutFor(provider: String): Long = when {
+            interactiveAllAnime && provider == "allanime" -> ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
+            ProviderCatalog.sourceOf(provider) == ProviderCatalog.Source.MIRURO ->
+                PipeBridge.sourceAttemptTimeoutMs()
+            else -> PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
+        }
         val ordered = providerAttemptOrder(
             preferred = preferred,
             providerNames = episodes.providerNames,
@@ -796,19 +803,9 @@ class MiruroRepository(
             excludedProviders = excludedProviders,
             maxAttempts = maxAttempts,
             attemptTimeoutMs = PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS,
-            attemptTimeoutMsFor = { provider ->
-                if (interactiveAllAnime && provider == "allanime") {
-                    ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
-                } else {
-                    PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
-                }
-            },
+            attemptTimeoutMsFor = ::attemptTimeoutFor,
             onAttempt = { provider ->
-                val timeoutMs = if (interactiveAllAnime && provider == "allanime") {
-                    ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
-                } else {
-                    PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
-                }
+                val timeoutMs = attemptTimeoutFor(provider)
                 DiagnosticsLog.event(
                     "Source resolve attempt provider=$provider id=$anilistId episode=$number " +
                         "timeoutMs=$timeoutMs interactiveChallenge=${provider == "allanime" && interactiveAllAnime}",
@@ -821,11 +818,7 @@ class MiruroRepository(
                 )
             },
             onTimeout = { provider ->
-                val timeoutMs = if (interactiveAllAnime && provider == "allanime") {
-                    ALLANIME_INTERACTIVE_SOURCE_TIMEOUT_MS
-                } else {
-                    PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
-                }
+                val timeoutMs = attemptTimeoutFor(provider)
                 DiagnosticsLog.event(
                     "Source resolve timeout provider=$provider id=$anilistId episode=$number " +
                         "afterMs=$timeoutMs",

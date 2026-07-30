@@ -1,6 +1,8 @@
 package com.miruronative.data.library
 
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.util.Locale
 import java.util.zip.GZIPInputStream
 import javax.xml.parsers.DocumentBuilderFactory
@@ -23,20 +25,49 @@ data class MalImportSummary(
 )
 
 object MalImport {
+    const val MAX_SOURCE_BYTES = 16 * 1024 * 1024
+    const val MAX_EXPANDED_XML_BYTES = 32 * 1024 * 1024
+
+    /**
+     * Reads a picker-provided export without allowing a malformed document provider to make the
+     * app allocate an unbounded byte array. The URI and file name are deliberately not retained.
+     */
+    fun readSource(input: InputStream): ByteArray =
+        input.readLimited(
+            maxBytes = MAX_SOURCE_BYTES,
+            tooLargeMessage = "The MAL export is larger than the 16 MB safety limit.",
+        )
+
     /**
      * Parses a MyAnimeList XML export. MAL serves exports gzipped (`.xml.gz`), so both raw XML
      * and gzip are accepted. Throws on files that aren't a MAL export at all; entries without a
      * usable MAL id are skipped.
      */
     fun parse(bytes: ByteArray): List<MalImportEntry> {
+        require(bytes.size <= MAX_SOURCE_BYTES) {
+            "The MAL export is larger than the 16 MB safety limit."
+        }
         val xmlBytes = if (isGzip(bytes)) {
-            GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+            GZIPInputStream(ByteArrayInputStream(bytes)).use { stream ->
+                stream.readLimited(
+                    maxBytes = MAX_EXPANDED_XML_BYTES,
+                    tooLargeMessage = "The expanded MAL export is larger than the 32 MB safety limit.",
+                )
+            }
         } else {
             bytes
         }
+        rejectUnsafeDeclarations(xmlBytes)
         val factory = DocumentBuilderFactory.newInstance().apply {
             // The file comes from outside the app; never resolve external entities.
+            // Android's bundled parser does not implement disallow-doctype-decl on every OS.
+            // Declarations have already been rejected byte-for-byte above, so these platform
+            // features are defense in depth and may safely remain best-effort.
             runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+            runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
+            runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
+            runCatching { setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false) }
+            runCatching { isXIncludeAware = false }
             isExpandEntityReferences = false
             isNamespaceAware = false
             isValidating = false
@@ -75,6 +106,30 @@ object MalImport {
     private fun isGzip(bytes: ByteArray): Boolean =
         bytes.size >= 2 && bytes[0] == 0x1F.toByte() && bytes[1] == 0x8B.toByte()
 
+    private fun rejectUnsafeDeclarations(bytes: ByteArray) {
+        // MAL exports are UTF-8. Reject NUL-containing encodings so a UTF-16 declaration cannot
+        // hide its markup from this ASCII-compatible scan and then be interpreted by the parser.
+        require(bytes.none { it == 0.toByte() }) { "Unsupported MyAnimeList XML encoding" }
+        val markup = String(bytes, Charsets.ISO_8859_1).uppercase(Locale.US)
+        require("<!DOCTYPE" !in markup && "<!ENTITY" !in markup) {
+            "MyAnimeList exports with document type or entity declarations are not supported"
+        }
+    }
+
     private fun Element.text(tag: String): String? =
         getElementsByTagName(tag).item(0)?.textContent?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun InputStream.readLimited(maxBytes: Int, tooLargeMessage: String): ByteArray {
+        val output = ByteArrayOutputStream(minOf(DEFAULT_BUFFER_SIZE, maxBytes))
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0
+        while (true) {
+            val count = read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= maxBytes) { tooLargeMessage }
+            output.write(buffer, 0, count)
+        }
+        return output.toByteArray()
+    }
 }

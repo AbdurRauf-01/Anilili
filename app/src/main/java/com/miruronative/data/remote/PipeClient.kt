@@ -38,7 +38,11 @@ class PipeClient(
 ) {
     // ---- request via the WebView bridge ----
 
-    private suspend fun pipeGet(path: String, query: JsonObject): JsonElement {
+    private suspend fun pipeGet(
+        path: String,
+        query: JsonObject,
+        responseTimeoutMs: Long = 30_000L,
+    ): JsonElement {
         val envelope = buildJsonObject {
             put("path", path)
             put("method", "GET")
@@ -49,7 +53,7 @@ class PipeClient(
             put("version", "0.1.0")
         }
         val e = base64UrlEncode(envelope.toString().toByteArray(Charsets.UTF_8))
-        val rawJson = PipeBridge.fetch(e)
+        val rawJson = PipeBridge.fetch(e, timeoutMs = responseTimeoutMs)
 
         return withContext(Dispatchers.Default) {
             val obj = json.parseToJsonElement(rawJson).jsonObject
@@ -134,6 +138,7 @@ class PipeClient(
                 put("category", category.api)
                 put("anilistId", anilistId)
             },
+            responseTimeoutMs = PIPE_SOURCE_RESPONSE_TIMEOUT_MS,
         ) as? JsonObject ?: return SourcesResult(emptyList(), emptyList(), null, null)
         return parseSources(root)
     }

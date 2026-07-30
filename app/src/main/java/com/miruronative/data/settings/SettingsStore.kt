@@ -49,20 +49,26 @@ enum class EpisodeLayout(val storedValue: String) {
     }
 }
 
-enum class DefaultQuality(val storedValue: String, val label: String) {
-    AUTO("auto", "Auto"),
-    HIGHEST("highest", "Highest"),
-    P1080("1080", "1080p"),
-    P720("720", "720p"),
-    P480("480", "480p");
+enum class DefaultQuality(
+    val storedValue: String,
+    val label: String,
+    val maxHeight: Int?,
+) {
+    AUTO("auto", "Auto", null),
+    HIGHEST("highest", "Highest", null),
+    P1080("1080", "1080p", 1080),
+    P720("720", "720p", 720),
+    P480("480", "480p", 480),
+    P360("360", "360p · Data Saver", 360);
 
     /** Best matching height from [heights], or null to leave adaptive selection alone. */
     fun pickHeight(heights: List<Int>): Int? = when (this) {
         AUTO -> null
         HIGHEST -> heights.maxOrNull()
-        // Closest height without going over; a low-quality-only source still plays its best.
+        // Closest height without going over. If every real rendition is above the requested cap,
+        // use the lowest one so playback still starts instead of rejecting the source.
         else -> {
-            val target = storedValue.toInt()
+            val target = requireNotNull(maxHeight)
             heights.filter { it <= target }.maxOrNull() ?: heights.minOrNull()
         }
     }

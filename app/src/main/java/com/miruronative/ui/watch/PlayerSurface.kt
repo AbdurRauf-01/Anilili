@@ -718,9 +718,11 @@ fun PlayerSurface(
         if (activeController.playbackState != Player.STATE_READY) return@LaunchedEffect
         val heights = availableVideoHeights(activeController, nativeQualityStreams)
         val target = defaultQuality.pickHeight(heights) ?: return@LaunchedEffect
+        val fellBackToLowest = defaultQuality.maxHeight?.let { target > it } == true
         defaultQualityApplied = true
         DiagnosticsLog.event(
-            "PlayerSurface default quality=${defaultQuality.storedValue} target=${target}p heights=$heights",
+            "PlayerSurface default quality=${defaultQuality.storedValue} target=${target}p " +
+                "fallbackToLowest=$fellBackToLowest heights=$heights",
         )
         changeVideoHeight(activeController, target)
     }
@@ -1106,6 +1108,7 @@ fun PlayerSurface(
                 speed = activeController.playbackParameters.speed,
                 onSpeedChange = { activeController.setPlaybackSpeed(it) },
                 qualityOptions = qualityOptions,
+                qualityMessage = dataSaverFallbackMessage(defaultQuality, trackHeights),
                 audioOptions = audioOptions,
                 contentScale = contentScale,
                 onContentScaleChange = { scale ->
@@ -1738,6 +1741,15 @@ internal fun declaredVideoHeight(label: String?): Int? = label
     ?.let { Regex("""(?<!\d)(\d{3,4})p\b""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1) }
     ?.toIntOrNull()
     ?.takeIf { it in 144..4320 }
+
+internal fun dataSaverFallbackMessage(
+    quality: DefaultQuality,
+    availableHeights: List<Int>,
+): String? {
+    if (quality != DefaultQuality.P360 || availableHeights.isEmpty() || 360 in availableHeights) return null
+    val selectedHeight = quality.pickHeight(availableHeights) ?: return null
+    return "360p is unavailable on this server. Data Saver is using ${selectedHeight}p."
+}
 
 private fun androidx.media3.common.Tracks.diagnosticSummary(): String = groups
     .filter { it.isSupported }

@@ -27,4 +27,29 @@ class PipeBridgeMirrorOrderTest {
     fun `unknown persisted mirror uses configured order`() {
         assertEquals(origins, orderedPipeOrigins(origins, ".invalid"))
     }
+
+    @Test
+    fun `cold start budget covers every mirror plus page settling`() {
+        assertEquals(
+            31_000L,
+            pipePageReadyTimeoutMs(
+                originCount = 4,
+                mirrorTimeoutMs = 7_000L,
+                pageSettleMs = 2_000L,
+                schedulerGraceMs = 1_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `source attempt cannot cancel a complete cold start`() {
+        assertEquals(
+            40_000L,
+            pipeSourceAttemptTimeoutMs(
+                pageReadyTimeoutMs = 31_000L,
+                responseTimeoutMs = 8_000L,
+                completionGraceMs = 1_000L,
+            ),
+        )
+    }
 }

@@ -7,6 +7,7 @@ import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.EpisodesResult
 import com.miruronative.data.model.ProviderData
 import com.miruronative.data.model.StreamItem
+import com.miruronative.data.settings.DefaultQuality
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -249,7 +250,18 @@ class WatchSourcePolicyTest {
     fun `quality height is recovered from provider label`() {
         assertEquals(1080, declaredVideoHeight("AllAnime 1080p Yt-mp4"))
         assertEquals(720, declaredVideoHeight("720P"))
+        assertEquals(360, declaredVideoHeight("360p Data Saver"))
         assertEquals(null, declaredVideoHeight("AllAnime auto"))
+    }
+
+    @Test
+    fun `data saver explains when a server has no 360p rendition`() {
+        assertEquals(
+            "360p is unavailable on this server. Data Saver is using 480p.",
+            dataSaverFallbackMessage(DefaultQuality.P360, listOf(1080, 720, 480)),
+        )
+        assertEquals(null, dataSaverFallbackMessage(DefaultQuality.P360, listOf(720, 360)))
+        assertEquals(null, dataSaverFallbackMessage(DefaultQuality.P480, listOf(1080, 720)))
     }
 
     @Test

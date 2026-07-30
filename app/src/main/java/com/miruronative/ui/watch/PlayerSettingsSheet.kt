@@ -95,6 +95,7 @@ internal fun PlayerSettingsSheet(
     speed: Float? = null,
     onSpeedChange: (Float) -> Unit = {},
     qualityOptions: List<PlayerQualityOption> = emptyList(),
+    qualityMessage: String? = null,
     audioOptions: List<PlayerQualityOption> = emptyList(),
     contentScale: PlayerContentScale? = null,
     onContentScaleChange: (PlayerContentScale) -> Unit = {},
@@ -115,6 +116,7 @@ internal fun PlayerSettingsSheet(
             speed = speed,
             onSpeedChange = onSpeedChange,
             qualityOptions = qualityOptions,
+            qualityMessage = qualityMessage,
             audioOptions = audioOptions,
             contentScale = contentScale,
             onContentScaleChange = onContentScaleChange,
@@ -211,6 +213,7 @@ private fun SheetSections(
     speed: Float?,
     onSpeedChange: (Float) -> Unit,
     qualityOptions: List<PlayerQualityOption>,
+    qualityMessage: String?,
     audioOptions: List<PlayerQualityOption>,
     contentScale: PlayerContentScale?,
     onContentScaleChange: (PlayerContentScale) -> Unit,
@@ -233,6 +236,14 @@ private fun SheetSections(
             qualityOptions.forEach { option ->
                 ChoiceChip(option.label, option.selected, option.onSelect)
             }
+        }
+        qualityMessage?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.68f),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
         }
     }
 

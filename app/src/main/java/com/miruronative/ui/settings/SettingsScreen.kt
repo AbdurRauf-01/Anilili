@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,9 +29,11 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
@@ -67,10 +70,12 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miruronative.data.auth.AuthManager
+import com.miruronative.data.auth.AccountService
 import com.miruronative.data.auth.MalAuthManager
 import com.miruronative.data.cache.CacheManager
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.library.MalExportFile
+import com.miruronative.data.library.MalImport
 import com.miruronative.data.reminder.AutomaticReleaseManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.data.ProviderCatalog
@@ -83,6 +88,7 @@ import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.settings.MenuLanguage
 import com.miruronative.data.update.UpdateManager
 import com.miruronative.diagnostics.DiagnosticTrigger
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.diagnostics.DiagnosticsUploadManager
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
@@ -92,8 +98,13 @@ import com.miruronative.ui.components.CaptionAppearanceDialog
 import com.miruronative.ui.components.LocalAppChromeBottomInset
 import com.miruronative.ui.components.ScrollAwareTopBar
 import com.miruronative.ui.profile.AniListProfile
+import com.miruronative.ui.profile.LoginWebView
+import com.miruronative.ui.profile.MalImportProgress
+import com.miruronative.ui.profile.MalImportStage
 import com.miruronative.ui.profile.ProfileViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -135,6 +146,9 @@ fun SettingsScreen(
     var malExportMessage by remember { mutableStateOf<String?>(null) }
     var malImportBusy by remember { mutableStateOf(false) }
     var malImportMessage by remember { mutableStateOf<String?>(null) }
+    var malImportProgress by remember { mutableStateOf<MalImportProgress?>(null) }
+    var malImportJob by remember { mutableStateOf<Job?>(null) }
+    var loginService by remember { mutableStateOf<AccountService?>(null) }
     var diagnosticsMessage by remember { mutableStateOf<String?>(null) }
     var diagnosticsBusy by remember { mutableStateOf(false) }
     var captionAppearanceVisible by remember { mutableStateOf(false) }
@@ -192,27 +206,96 @@ fun SettingsScreen(
     val malImportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
+        if (uri == null) {
+            DiagnosticsLog.event("mal_import", "picker.cancelled")
+            return@rememberLauncherForActivityResult
+        }
+        malImportJob = scope.launch {
             malImportBusy = true
             malImportMessage = null
-            runCatching {
+            malImportProgress = MalImportProgress(MalImportStage.READING)
+            try {
+                val mimeType = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+                val reportedBytes = context.malImportReportedSize(uri)
+                DiagnosticsLog.event(
+                    category = "mal_import",
+                    name = "picker.file_selected",
+                    attributes = mapOf(
+                        "mimeType" to (mimeType ?: "unknown"),
+                        "reportedBytes" to (reportedBytes ?: -1L),
+                    ),
+                )
+                if (reportedBytes != null && reportedBytes > MalImport.MAX_SOURCE_BYTES) {
+                    error("The MAL export is larger than the 16 MB safety limit.")
+                }
                 val bytes = withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        MalImport.readSource(stream)
+                    }
                         ?: error("Couldn't open that file")
                 }
-                vm.importMalXml(bytes)
-            }.onSuccess { summary ->
+                DiagnosticsLog.event(
+                    category = "mal_import",
+                    name = "picker.file_read",
+                    attributes = mapOf("actualBytes" to bytes.size),
+                )
+                val summary = vm.importMalXml(bytes) { progress ->
+                    malImportProgress = progress
+                }
                 malImportMessage = buildString {
                     append("Imported ${summary.added} new anime")
                     if (summary.alreadySaved > 0) append("; ${summary.alreadySaved} already saved")
                     if (summary.unmatched > 0) append("; ${summary.unmatched} not found on AniList")
                 }
-            }.onFailure { error ->
+            } catch (error: CancellationException) {
+                DiagnosticsLog.event(
+                    category = "mal_import",
+                    name = "ui.cancelled",
+                    attributes = mapOf("stage" to (malImportProgress?.stage?.name?.lowercase() ?: "reading")),
+                )
+                malImportMessage = "MyAnimeList import cancelled"
+                throw error
+            } catch (error: Exception) {
+                DiagnosticsLog.event(
+                    category = "mal_import",
+                    name = "ui.failed",
+                    attributes = mapOf(
+                        "stage" to (malImportProgress?.stage?.name?.lowercase() ?: "reading"),
+                        "errorType" to error.javaClass.simpleName,
+                        "message" to (error.message ?: "none"),
+                    ),
+                )
                 malImportMessage = error.message ?: "MAL import failed"
+            } finally {
+                malImportProgress = null
+                malImportBusy = false
+                malImportJob = null
             }
-            malImportBusy = false
         }
+    }
+
+    when (loginService) {
+        AccountService.ANILIST -> {
+            LoginWebView(
+                authorizeUrl = remember(loginService) { AuthManager.authorizeUrl() },
+                isRedirect = AuthManager::isRedirect,
+                extractResult = AuthManager::extractToken,
+                onResult = { loginService = null; vm.onLoggedIn(it) },
+                onCancel = { loginService = null },
+            )
+            return
+        }
+        AccountService.MAL -> {
+            LoginWebView(
+                authorizeUrl = remember(loginService) { MalAuthManager.authorizeUrl() },
+                isRedirect = MalAuthManager::isRedirect,
+                extractResult = MalAuthManager::extractCode,
+                onResult = { loginService = null; vm.onMalCode(it) },
+                onCancel = { loginService = null },
+            )
+            return
+        }
+        null -> Unit
     }
 
     fun setReleaseNotifications(enabled: Boolean) {
@@ -421,6 +504,32 @@ fun SettingsScreen(
                 expanded = "List sync (AniList / MyAnimeList)" in expandedSections,
                 onToggle = { toggleSection("List sync (AniList / MyAnimeList)") },
             ) {
+            item {
+                SettingsAction(
+                    title = if (token != null) "Reconnect AniList" else "Sign in to AniList",
+                    description = when {
+                        token != null -> "AniList is the active list service"
+                        malLoggedIn -> "Switches list sync to AniList after sign-in succeeds"
+                        else -> "Connect lists, scores, and episode progress"
+                    },
+                    icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
+                    enabled = true,
+                    onClick = { loginService = AccountService.ANILIST },
+                )
+            }
+            item {
+                SettingsAction(
+                    title = if (malLoggedIn) "Reconnect MyAnimeList" else "Sign in to MyAnimeList",
+                    description = when {
+                        malLoggedIn && token == null -> "MyAnimeList is the active list service"
+                        token != null -> "Switches list sync to MyAnimeList after sign-in succeeds"
+                        else -> "Connect lists, scores, and episode progress"
+                    },
+                    icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
+                    enabled = true,
+                    onClick = { loginService = AccountService.MAL },
+                )
+            }
             item { SettingSwitch("Sync episode progress", "Update watched episodes while playing", autoSync, SettingsStore::setAutoSyncAniList) }
             item {
                 SettingSwitch(
@@ -472,13 +581,23 @@ fun SettingsScreen(
             }
             item {
                 SettingsAction(
-                    title = if (malImportBusy) "Importing MyAnimeList XML..." else "Import MyAnimeList XML",
-                    icon = { Icon(Icons.Default.Upload, contentDescription = null) },
-                    enabled = !malImportBusy,
-                    onClick = {
-                        malImportLauncher.launch(
-                            arrayOf("text/xml", "application/xml", "application/gzip", "application/octet-stream", "*/*"),
+                    title = if (malImportBusy) "Cancel MyAnimeList XML import" else "Import MyAnimeList XML",
+                    description = malImportProgress?.label,
+                    icon = {
+                        Icon(
+                            if (malImportBusy) Icons.Default.Close else Icons.Default.Upload,
+                            contentDescription = null,
                         )
+                    },
+                    enabled = true,
+                    onClick = {
+                        if (malImportBusy) {
+                            malImportJob?.cancel()
+                        } else {
+                            malImportLauncher.launch(
+                                arrayOf("text/xml", "application/xml", "application/gzip", "application/octet-stream", "*/*"),
+                            )
+                        }
                     },
                 )
             }
@@ -771,12 +890,13 @@ private fun DefaultQualitySetting(
             fontWeight = FontWeight.Medium,
         )
         Text(
-            "Picked automatically when an episode starts in the built-in player",
+            "Picked automatically when an episode starts. Data Saver caps playback at 360p " +
+                "when possible and otherwise uses the closest available low resolution.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp),
         )
-        // Five chips outgrow a single row on narrow portrait widths, so let them wrap.
+        // Quality chips outgrow a single row on narrow portrait widths, so let them wrap.
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(top = 6.dp),
@@ -1022,6 +1142,21 @@ private fun SettingsAction(
         }
     }
 }
+
+private fun Context.malImportReportedSize(uri: Uri): Long? =
+    runCatching {
+        contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            val column = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (column < 0 || cursor.isNull(column)) null else cursor.getLong(column).takeIf { it >= 0L }
+        }
+    }.getOrNull()
 
 @Composable
 private fun SectionDivider() {

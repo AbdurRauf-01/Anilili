@@ -55,6 +55,7 @@ import java.util.concurrent.ConcurrentHashMap
 class AniListClient(
     private val client: OkHttpClient,
     private val json: Json,
+    private val endpoint: String = ANILIST_URL,
 ) {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
@@ -741,7 +742,7 @@ class AniListClient(
         while (true) {
             awaitRateSlot()
             val builder = Request.Builder()
-                .url(ANILIST_URL)
+                .url(endpoint)
                 .post(payload.toRequestBody(jsonMedia))
                 .header("Accept", "application/json")
                 .header("User-Agent", USER_AGENT)

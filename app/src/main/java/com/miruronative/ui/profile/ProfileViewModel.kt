@@ -17,13 +17,18 @@ import com.miruronative.data.library.MalExportFile
 import com.miruronative.data.library.MalImport
 import com.miruronative.data.library.MalImportSummary
 import com.miruronative.data.library.WatchlistEntry
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
+import java.io.IOException
 
 data class AniListProfile(
     val viewer: Viewer,
@@ -36,6 +41,31 @@ data class AniListProfile(
     /** Which service these lists came from; AniList and MAL entries share this shape. */
     val service: AccountService = AccountService.ANILIST,
 )
+
+enum class MalImportStage {
+    READING,
+    PARSING,
+    MATCHING,
+    SAVING,
+}
+
+data class MalImportProgress(
+    val stage: MalImportStage,
+    val completed: Int = 0,
+    val total: Int = 0,
+) {
+    val label: String
+        get() = when (stage) {
+            MalImportStage.READING -> "Reading file"
+            MalImportStage.PARSING -> "Parsing list"
+            MalImportStage.MATCHING -> if (total > 0) {
+                "Matching titles $completed/$total"
+            } else {
+                "Matching titles"
+            }
+            MalImportStage.SAVING -> "Saving watchlist"
+        }
+}
 
 class ProfileViewModel : ViewModel() {
     private val repo = AppGraph.repository
@@ -84,6 +114,9 @@ class ProfileViewModel : ViewModel() {
 
     fun onLoggedIn(token: String) {
         AuthManager.setToken(token)
+        // AccountService promises one active service. Only clear the previous service after the
+        // replacement login has succeeded, so a cancelled login never disconnects the user.
+        MalAuthManager.logout()
         LibraryStore.syncSavedToRemote()
         loadIfLoggedIn()
     }
@@ -94,6 +127,7 @@ class ProfileViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 MalAuthManager.exchangeCode(code)
+                AuthManager.logout()
                 LibraryStore.syncSavedToRemote()
                 loadIfLoggedIn()
             } catch (e: Exception) {
@@ -116,29 +150,137 @@ class ProfileViewModel : ViewModel() {
      * is saved (the file is the user's own list); titles AniList can't map from a MAL id are
      * counted as unmatched rather than failing the run.
      */
-    suspend fun importMalXml(bytes: ByteArray): MalImportSummary = withContext(Dispatchers.IO) {
-        val parsed = MalImport.parse(bytes)
-        if (parsed.isEmpty()) error("No anime entries found in that file")
-        val mediaByMalId = repo.mediaByMalIds(parsed.map { it.malId })
-            .filter { it.idMal != null }
-            .associateBy { it.idMal!! }
-        val entries = parsed.mapNotNull { entry ->
-            val media = mediaByMalId[entry.malId] ?: return@mapNotNull null
-            WatchlistEntry(
-                anilistId = media.id,
-                title = media.title.preferred,
-                cover = media.coverImage.best,
-                format = media.format,
-                averageScore = media.averageScore,
-            )
-        }
-        val added = LibraryStore.importWatchlist(entries)
-        MalImportSummary(
-            totalEntries = parsed.size,
-            added = added,
-            alreadySaved = entries.size - added,
-            unmatched = parsed.size - entries.size,
+    suspend fun importMalXml(
+        bytes: ByteArray,
+        onProgress: (MalImportProgress) -> Unit = {},
+    ): MalImportSummary = withContext(Dispatchers.IO) {
+        val startedAt = System.nanoTime()
+        var stage = MalImportStage.PARSING
+        DiagnosticsLog.event(
+            category = "mal_import",
+            name = "import.started",
+            attributes = mapOf("sourceBytes" to bytes.size),
         )
+        try {
+            reportMalImportProgress(onProgress, MalImportProgress(stage))
+            val parsed = MalImport.parse(bytes)
+            if (parsed.isEmpty()) error("No anime entries found in that file")
+
+            val chunks = parsed.map { it.malId }.distinct().chunked(MAL_IMPORT_BATCH_SIZE)
+            val matchingTimeoutMs = malImportMatchTimeoutMs(chunks.size)
+            DiagnosticsLog.event(
+                category = "mal_import",
+                name = "matching.started",
+                attributes = mapOf(
+                    "entries" to parsed.size,
+                    "batches" to chunks.size,
+                    "timeoutMs" to matchingTimeoutMs,
+                ),
+            )
+            val resolvedMedia = buildList {
+                stage = MalImportStage.MATCHING
+                try {
+                    withTimeout(matchingTimeoutMs) {
+                        chunks.forEachIndexed { index, chunk ->
+                            reportMalImportProgress(
+                                onProgress,
+                                MalImportProgress(
+                                    stage = stage,
+                                    completed = index,
+                                    total = chunks.size,
+                                ),
+                            )
+                            val batchStartedAt = System.nanoTime()
+                            val matched = repo.mediaByMalIds(chunk)
+                            addAll(matched)
+                            DiagnosticsLog.event(
+                                category = "mal_import",
+                                name = "matching.batch_completed",
+                                attributes = mapOf(
+                                    "batch" to (index + 1),
+                                    "batches" to chunks.size,
+                                    "requested" to chunk.size,
+                                    "matched" to matched.size,
+                                    "durationMs" to elapsedMs(batchStartedAt),
+                                ),
+                            )
+                            reportMalImportProgress(
+                                onProgress,
+                                MalImportProgress(
+                                    stage = stage,
+                                    completed = index + 1,
+                                    total = chunks.size,
+                                ),
+                            )
+                        }
+                    }
+                } catch (error: TimeoutCancellationException) {
+                    throw IOException(
+                        "MAL import timed out while matching titles with AniList. " +
+                            "Check your connection, private DNS, or VPN, then try again.",
+                        error,
+                    )
+                }
+            }
+            val mediaByMalId = resolvedMedia
+                .filter { it.idMal != null }
+                .associateBy { it.idMal!! }
+            val entries = parsed.mapNotNull { entry ->
+                val media = mediaByMalId[entry.malId] ?: return@mapNotNull null
+                WatchlistEntry(
+                    anilistId = media.id,
+                    title = media.title.preferred,
+                    cover = media.coverImage.best,
+                    format = media.format,
+                    averageScore = media.averageScore,
+                )
+            }
+            stage = MalImportStage.SAVING
+            reportMalImportProgress(onProgress, MalImportProgress(stage))
+            // Nothing is written until every AniList batch succeeds. Cancellation or a timeout
+            // therefore leaves the existing watchlist unchanged instead of half-imported.
+            val added = LibraryStore.importWatchlist(entries)
+            val summary = MalImportSummary(
+                totalEntries = parsed.size,
+                added = added,
+                alreadySaved = entries.size - added,
+                unmatched = parsed.size - entries.size,
+            )
+            DiagnosticsLog.event(
+                category = "mal_import",
+                name = "import.completed",
+                attributes = mapOf(
+                    "entries" to summary.totalEntries,
+                    "added" to summary.added,
+                    "alreadySaved" to summary.alreadySaved,
+                    "unmatched" to summary.unmatched,
+                    "durationMs" to elapsedMs(startedAt),
+                ),
+            )
+            summary
+        } catch (error: CancellationException) {
+            DiagnosticsLog.event(
+                category = "mal_import",
+                name = "import.cancelled",
+                attributes = mapOf(
+                    "stage" to stage.name.lowercase(),
+                    "durationMs" to elapsedMs(startedAt),
+                ),
+            )
+            throw error
+        } catch (error: Exception) {
+            DiagnosticsLog.event(
+                category = "mal_import",
+                name = "import.failed",
+                attributes = mapOf(
+                    "stage" to stage.name.lowercase(),
+                    "durationMs" to elapsedMs(startedAt),
+                    "errorType" to error.javaClass.simpleName,
+                    "message" to (error.message ?: "none"),
+                ),
+            )
+            throw error
+        }
     }
 
     suspend fun buildMalExport(
@@ -212,6 +354,25 @@ class ProfileViewModel : ViewModel() {
         MalExport.fromEntries(profile?.viewer?.name, entries.values.toList(), skipped)
     }
 }
+
+private fun elapsedMs(startedAtNanos: Long): Long =
+    (System.nanoTime() - startedAtNanos) / 1_000_000L
+
+private suspend fun reportMalImportProgress(
+    callback: (MalImportProgress) -> Unit,
+    progress: MalImportProgress,
+) = withContext(Dispatchers.Main.immediate) {
+    callback(progress)
+}
+
+internal fun malImportMatchTimeoutMs(batchCount: Int): Long =
+    (MAL_IMPORT_BASE_TIMEOUT_MS + batchCount.coerceAtLeast(1) * MAL_IMPORT_PER_BATCH_TIMEOUT_MS)
+        .coerceAtMost(MAL_IMPORT_MAX_TIMEOUT_MS)
+
+private const val MAL_IMPORT_BATCH_SIZE = 50
+private const val MAL_IMPORT_BASE_TIMEOUT_MS = 3L * 60L * 1_000L
+private const val MAL_IMPORT_PER_BATCH_TIMEOUT_MS = 5_000L
+private const val MAL_IMPORT_MAX_TIMEOUT_MS = 10L * 60L * 1_000L
 
 /** Custom-list-only entries are duplicated across groups; flatten and classify by entry status. */
 internal fun MediaListCollection?.allEntries(): List<MediaListEntry> = this?.lists.orEmpty()

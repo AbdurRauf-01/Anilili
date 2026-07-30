@@ -258,7 +258,36 @@ fun ProfileScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    if (device.isTv) {
+                    if (device.isTv && !loggedIn) {
+                        // Give the two provider buttons the whole first focus row. In the old
+                        // split layout, D-pad focus entered the filter panel on the right and made
+                        // the AniList button appear unresponsive or unreachable on some TVs.
+                        item {
+                            ProfileHero(
+                                loggedIn = false,
+                                state = profileState,
+                                onLogin = { loginService = it },
+                                onSync = { vm.loadIfLoggedIn() },
+                                onLogout = vm::logout,
+                                modifier = Modifier.padding(horizontal = device.pagePadding),
+                            )
+                        }
+                        item {
+                            LibraryFilters(
+                                selectedView = selectedView,
+                                onViewChange = { selectedViewName = it.name },
+                                selectedFormat = selectedFormat,
+                                onFormatChange = { selectedFormat = it },
+                                selectedAiring = selectedAiring,
+                                onAiringChange = { selectedAiring = it },
+                                titleFilter = titleFilter,
+                                onTitleFilterChange = { titleFilter = it },
+                                resultCount = selectedCards.size,
+                                showAniListLists = false,
+                                modifier = Modifier.padding(horizontal = device.pagePadding),
+                            )
+                        }
+                    } else if (device.isTv) {
                         item {
                             Row(
                                 modifier = Modifier

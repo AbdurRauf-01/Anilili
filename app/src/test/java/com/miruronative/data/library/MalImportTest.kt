@@ -1,5 +1,6 @@
 package com.miruronative.data.library
 
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPOutputStream
 import org.junit.Assert.assertEquals
@@ -65,6 +66,57 @@ class MalImportTest {
         assertThrows(Exception::class.java) {
             MalImport.parse("<html><body>not a list</body></html>".toByteArray())
         }
+    }
+
+    @Test
+    fun rejectsDoctypeInsteadOfResolvingExternalEntities() {
+        val xml = """
+            <?xml version="1.0"?>
+            <!DOCTYPE myanimelist [<!ENTITY local SYSTEM "file:///etc/passwd">]>
+            <myanimelist><anime><series_animedb_id>1</series_animedb_id><series_title>&local;</series_title></anime></myanimelist>
+        """.trimIndent()
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            MalImport.parse(xml.toByteArray())
+        }
+        assertEquals(
+            "MyAnimeList exports with document type or entity declarations are not supported",
+            error.message,
+        )
+    }
+
+    @Test
+    fun rejectsNullEncodedXmlThatCouldBypassTheDeclarationScan() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            MalImport.parse(sampleXml.toByteArray(Charsets.UTF_16LE))
+        }
+
+        assertEquals("Unsupported MyAnimeList XML encoding", error.message)
+    }
+
+    @Test
+    fun pickerReadRejectsInputPastSafetyLimit() {
+        val oversized = ByteArray(MalImport.MAX_SOURCE_BYTES + 1)
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            MalImport.readSource(ByteArrayInputStream(oversized))
+        }
+
+        assertEquals("The MAL export is larger than the 16 MB safety limit.", error.message)
+    }
+
+    @Test
+    fun rejectsGzipThatExpandsPastSafetyLimit() {
+        val expanded = ByteArray(MalImport.MAX_EXPANDED_XML_BYTES + 1)
+        val gzipped = ByteArrayOutputStream().also { buffer ->
+            GZIPOutputStream(buffer).use { it.write(expanded) }
+        }.toByteArray()
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            MalImport.parse(gzipped)
+        }
+
+        assertEquals("The expanded MAL export is larger than the 32 MB safety limit.", error.message)
     }
 
     @Test

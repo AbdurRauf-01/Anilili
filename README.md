@@ -179,6 +179,45 @@ The in-app updater depends on these release asset names:
 The underscore before the ABI is intentional. It keeps the universal APK first in GitHub's asset
 ordering so older app versions do not accidentally download an incompatible architecture build.
 
+### Publishing an update (every version bump)
+
+The in-app updater has two channels: the GitHub Releases API (primary) and a signed Nostr
+manifest (fallback, used when GitHub is unreachable or the repo is gone). Both must be updated
+on every release so they never disagree:
+
+1. Bump `appVersionCode` and `appVersionName` in `app/build.gradle.kts`.
+2. Build the release APKs: `./gradlew assembleRelease` (produces `Anilili.apk`,
+   `Anilili_arm64-v8a.apk`, `Anilili_armeabi-v7a.apk`).
+3. Create/edit the rolling GitHub release with the three APKs attached under the names above.
+4. Publish the same release to Nostr:
+
+   ```bash
+   scripts/.venv/Scripts/python scripts/nostr_update.py publish \
+     --version 0.1.54 \
+     --apk-url "https://github.com/kompoti121/Anilili/releases/latest/download/Anilili.apk" \
+     --changelog "What changed in this release" \
+     --size-bytes 12345678
+   ```
+
+   Verify what apps will see with `scripts/nostr_update.py fetch`.
+
+**If GitHub suspends the account or removes the repo:** upload the release APKs to any mirror
+(GitLab, Cloudflare R2, a plain VPS — anything with a direct HTTPS link), then run step 4 with
+`--apk-url` pointing at the mirror. Every installed app (v0.1.54+) will find the signed manifest
+on Nostr and update from the new host. No app-side change is needed.
+
+Setup and key handling for the Nostr channel:
+
+- One-time setup: `python -m venv scripts/.venv`, then
+  `scripts/.venv/Scripts/pip install -r scripts/requirements.txt`.
+- The signing key lives in `nostr-update-key.properties` at the repo root (gitignored).
+  **Back it up alongside `keystore/anilili-release.jks`** — losing it means losing the ability
+  to repoint updates for already-installed apps. The matching pubkey is baked into
+  `NostrUpdateSource.MANIFEST_PUBKEY_HEX`; never rotate the key without shipping an app update
+  that carries the new pubkey.
+- The manifest is a Nostr addressable event (kind 30078, d-tag `anilili-update`); relays keep
+  only the newest one, so publishing is the whole update — there is nothing to clean up.
+
 ### Project map
 
 | Path | Purpose |

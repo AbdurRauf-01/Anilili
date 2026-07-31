@@ -28,6 +28,11 @@ import okhttp3.Request
  * (`kompoti121/anilili`, tag `APK-release`), downloads the APK asset, and hands it
  * to the system package installer. Android rejects the install unless the new APK
  * is signed with the same key, so a hijacked release can't replace the app.
+ *
+ * Update sources are tried in order: the GitHub Releases API first, then the Nostr
+ * signed manifest (see NostrUpdateSource) if GitHub is unreachable or the repo is
+ * gone. The Nostr manifest can point at any APK host, which keeps updates working
+ * even if the GitHub account is suspended.
  */
 object UpdateManager {
     data class UpdateInfo(
@@ -195,7 +200,16 @@ object UpdateManager {
         if (_state.value !is State.Downloading) _state.value = State.Idle
     }
 
-    private fun fetchLatest(): UpdateInfo {
+    private fun fetchLatest(): UpdateInfo =
+        runCatching { fetchLatestGitHub() }.getOrElse { gitHubError ->
+            DiagnosticsLog.throwable("GitHub update check failed; falling back to Nostr manifest", gitHubError)
+            runCatching { NostrUpdateSource.fetchManifest(AppGraph.httpClient, json) }.getOrElse { nostrError ->
+                DiagnosticsLog.throwable("Nostr update check also failed", nostrError)
+                throw gitHubError
+            }
+        }
+
+    private fun fetchLatestGitHub(): UpdateInfo {
         val request = Request.Builder()
             .url(RELEASES_LATEST)
             .header("Accept", "application/vnd.github+json")
@@ -269,10 +283,11 @@ object UpdateManager {
         return file
     }
 
-    private fun parseVersion(text: String): String? =
-        Regex("""v?(\d+(?:\.\d+)+)""").find(text)?.groupValues?.get(1)
-
 }
+
+/** Shared version extraction used by both the GitHub and Nostr update sources. */
+internal fun parseVersion(text: String): String? =
+    Regex("""v?(\d+(?:\.\d+)+)""").find(text)?.groupValues?.get(1)
 
 internal fun compareAppVersions(remote: String, installed: String): Int {
     fun parts(version: String): List<Int> = version

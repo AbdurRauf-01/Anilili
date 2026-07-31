@@ -18,6 +18,8 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+nostr-update-key.properties
+scripts/.venv/
 
 # Local/editor state
 .idea/

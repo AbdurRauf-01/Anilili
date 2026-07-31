@@ -186,9 +186,12 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.tvprovider)
     implementation(libs.androidx.profileinstaller)
+    // Schnorr (BIP-340) verification for the Nostr update-manifest fallback in UpdateManager.
+    implementation(libs.acinq.secp256k1.android)
     baselineProfile(project(":benchmark"))
     testImplementation(libs.junit)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.acinq.secp256k1.jvm)
     androidTestImplementation("androidx.test:core-ktx:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

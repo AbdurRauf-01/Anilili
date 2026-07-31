@@ -91,6 +91,7 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.DefaultTrackNameProvider
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
+import androidx.media3.exoplayer.ExoPlaybackException
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.model.hasUsableWindow
@@ -371,7 +372,14 @@ fun PlayerSurface(
                         )
                         return
                     }
-                    if (error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED && !decoderRetryDone) {
+                    val exoError = error as? ExoPlaybackException
+                    val retryAtLowerVideoResolution = shouldRetryDecoderAtLowerVideoResolution(
+                        errorCode = error.errorCode,
+                        rendererName = exoError?.rendererName,
+                        sampleMimeType = exoError?.rendererFormat?.sampleMimeType,
+                        errorMessage = error.message,
+                    )
+                    if (retryAtLowerVideoResolution && !decoderRetryDone) {
                         decoderRetryDone = true
                         val resumeAt = activeController.currentPosition.coerceAtLeast(0L)
                         activeController.trackSelectionParameters = activeController.trackSelectionParameters
@@ -386,6 +394,14 @@ fun PlayerSurface(
                             "PlayerSurface decoder failed; retrying same stream capped at 720p resumeMs=$resumeAt",
                         )
                         return
+                    }
+                    if (
+                        error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED &&
+                        !retryAtLowerVideoResolution
+                    ) {
+                        DiagnosticsLog.event(
+                            "PlayerSurface audio decoder failed; skipping ineffective video-quality retry",
+                        )
                     }
                     val elapsedSinceSeekMs = if (lastUserSeekRealtimeMs == Long.MIN_VALUE) {
                         Long.MAX_VALUE

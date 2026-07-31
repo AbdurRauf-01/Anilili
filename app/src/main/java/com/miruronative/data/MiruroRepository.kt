@@ -111,16 +111,31 @@ internal enum class SourceFailureKind {
     FAILURE,
     TIMEOUT,
     EMPTY,
+    PLAYBACK,
 }
 
 /**
- * Prevents repeated retries of the same failed provider for the same episode. The key is scoped to
- * one title/episode, so a bad KAA mapping cannot suppress KAA for unrelated anime.
+ * Prevents repeated retries of failed providers. Episode failures stay scoped to one title and
+ * episode, while repeated network-level failures briefly open a provider-wide circuit breaker.
+ * Playback failures live longer than resolver failures and are not cleared merely because the
+ * provider can still return the same broken stream URL.
  */
 internal class SourceFailureCooldowns(
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
-    private val unavailableUntil = ConcurrentHashMap<String, Long>()
+    private data class EpisodeCooldown(
+        val untilMs: Long,
+        val kind: SourceFailureKind,
+    )
+
+    private data class ProviderFailureState(
+        val count: Int,
+        val windowStartedMs: Long,
+        val unavailableUntilMs: Long,
+    )
+
+    private val episodeCooldowns = ConcurrentHashMap<String, EpisodeCooldown>()
+    private val providerFailures = ConcurrentHashMap<String, ProviderFailureState>()
 
     fun coolingProviders(
         anilistId: Int,
@@ -130,13 +145,14 @@ internal class SourceFailureCooldowns(
         val now = nowMs()
         return providers.filterTo(linkedSetOf()) { provider ->
             val key = key(provider, anilistId, episode)
-            val until = unavailableUntil[key] ?: return@filterTo false
-            if (until > now) {
-                true
-            } else {
-                unavailableUntil.remove(key, until)
-                false
-            }
+            val episodeCooldown = episodeCooldowns[key]
+            val episodeCooling = episodeCooldown?.untilMs?.let { until ->
+                if (until > now) true else {
+                    episodeCooldowns.remove(key, episodeCooldown)
+                    false
+                }
+            } ?: false
+            episodeCooling || providerIsCooling(provider, now)
         }
     }
 
@@ -154,20 +170,93 @@ internal class SourceFailureCooldowns(
                 5 * 60_000L
             "no native HLS server" in message || "episode page is unavailable" in message ->
                 10 * 60_000L
+            kind == SourceFailureKind.PLAYBACK -> 5 * 60_000L
             kind == SourceFailureKind.TIMEOUT -> 2 * 60_000L
             kind == SourceFailureKind.EMPTY -> 2 * 60_000L
             else -> 60_000L
         }
-        unavailableUntil[key(provider, anilistId, episode)] = nowMs() + durationMs
+        val now = nowMs()
+        episodeCooldowns[key(provider, anilistId, episode)] = EpisodeCooldown(
+            untilMs = now + durationMs,
+            kind = kind,
+        )
+        recordProviderFailure(provider, kind, message, now)
         return durationMs
     }
 
-    fun clear(provider: String, anilistId: Int, episode: Double) {
-        unavailableUntil.remove(key(provider, anilistId, episode))
+    fun clearResolved(provider: String, anilistId: Int, episode: Double) {
+        val key = key(provider, anilistId, episode)
+        episodeCooldowns.computeIfPresent(key) { _, cooldown ->
+            cooldown.takeIf { it.kind == SourceFailureKind.PLAYBACK }
+        }
+        providerFailures.remove(provider.lowercase())
+    }
+
+    private fun recordProviderFailure(
+        provider: String,
+        kind: SourceFailureKind,
+        message: String,
+        now: Long,
+    ) {
+        if (kind == SourceFailureKind.PLAYBACK) return
+        val normalizedMessage = message.lowercase()
+        val rateLimited = "429" in normalizedMessage
+        val networkOutage = kind == SourceFailureKind.TIMEOUT ||
+            Regex("""\bhttp\s+5\d\d\b""").containsMatchIn(normalizedMessage) ||
+            listOf(
+                "failed to connect",
+                "unable to resolve host",
+                "connection reset",
+                "timed out",
+                "timeout",
+            ).any(normalizedMessage::contains)
+        if (!rateLimited && !networkOutage) return
+
+        val providerKey = provider.lowercase()
+        providerFailures.compute(providerKey) { _, previous ->
+            if (rateLimited) {
+                ProviderFailureState(
+                    count = GLOBAL_PROVIDER_FAILURE_THRESHOLD,
+                    windowStartedMs = now,
+                    unavailableUntilMs = now + GLOBAL_RATE_LIMIT_COOLDOWN_MS,
+                )
+            } else {
+                val activeWindow = previous?.takeIf {
+                    now - it.windowStartedMs <= GLOBAL_PROVIDER_FAILURE_WINDOW_MS
+                }
+                val count = (activeWindow?.count ?: 0) + 1
+                ProviderFailureState(
+                    count = count,
+                    windowStartedMs = activeWindow?.windowStartedMs ?: now,
+                    unavailableUntilMs = if (count >= GLOBAL_PROVIDER_FAILURE_THRESHOLD) {
+                        now + GLOBAL_PROVIDER_COOLDOWN_MS
+                    } else {
+                        0L
+                    },
+                )
+            }
+        }
+    }
+
+    private fun providerIsCooling(provider: String, now: Long): Boolean {
+        val providerKey = provider.lowercase()
+        val state = providerFailures[providerKey] ?: return false
+        if (state.unavailableUntilMs > now) return true
+        if (now - state.windowStartedMs > GLOBAL_PROVIDER_FAILURE_WINDOW_MS) {
+            providerFailures.remove(providerKey, state)
+        }
+        return false
     }
 
     private fun key(provider: String, anilistId: Int, episode: Double): String =
         "${provider.lowercase()}:$anilistId:$episode"
+
+    private companion object {
+        const val GLOBAL_PROVIDER_FAILURE_THRESHOLD = 2
+        const val GLOBAL_PROVIDER_FAILURE_WINDOW_MS = 2 * 60_000L
+        const val GLOBAL_PROVIDER_COOLDOWN_MS = 2 * 60_000L
+        const val GLOBAL_RATE_LIMIT_COOLDOWN_MS = 10 * 60_000L
+    }
 }
 
 /**
@@ -936,12 +1025,36 @@ class MiruroRepository(
             )
         }
         resolution.resolved?.provider?.let { provider ->
-            sourceFailureCooldowns.clear(provider, anilistId, number)
+            sourceFailureCooldowns.clearResolved(provider, anilistId, number)
         }
         return SourceResolution(
             resolved = resolution.resolved?.let { ResolvedSources(it.sources, it.provider) },
             unavailableProviders = resolution.unavailableProviders + coolingProviders,
         )
+    }
+
+    /**
+     * A provider may resolve successfully and still return media that fails in the platform player.
+     * Keep that provider out of this episode's fallback order across WatchViewModel recreation.
+     */
+    fun recordPlaybackFailure(
+        anilistId: Int,
+        number: Double,
+        provider: String,
+        streamHost: String?,
+        message: String,
+    ): Long {
+        val cooldownMs = sourceFailureCooldowns.record(
+            provider = provider,
+            anilistId = anilistId,
+            episode = number,
+            kind = SourceFailureKind.PLAYBACK,
+        )
+        DiagnosticsLog.event(
+            "Source playback cooldown provider=$provider id=$anilistId episode=$number " +
+                "host=${streamHost ?: "unknown"} cooldownMs=$cooldownMs message=${message.take(160)}",
+        )
+        return cooldownMs
     }
 
     private suspend fun mediaPage(

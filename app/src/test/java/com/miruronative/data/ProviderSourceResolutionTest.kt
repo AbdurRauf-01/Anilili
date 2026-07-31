@@ -36,6 +36,52 @@ class ProviderSourceResolutionTest {
     }
 
     @Test
+    fun `successful resolution does not clear a playback failure cooldown`() {
+        var now = 1_000L
+        val cooldowns = SourceFailureCooldowns { now }
+
+        val duration = cooldowns.record(
+            provider = "senshi",
+            anilistId = 813,
+            episode = 87.0,
+            kind = SourceFailureKind.PLAYBACK,
+        )
+        cooldowns.clearResolved("senshi", 813, 87.0)
+
+        assertEquals(5 * 60_000L, duration)
+        assertEquals(setOf("senshi"), cooldowns.coolingProviders(813, 87.0, listOf("senshi")))
+        now += duration
+        assertTrue(cooldowns.coolingProviders(813, 87.0, listOf("senshi")).isEmpty())
+    }
+
+    @Test
+    fun `repeated provider timeouts briefly open a cross-title circuit breaker`() {
+        var now = 1_000L
+        val cooldowns = SourceFailureCooldowns { now }
+
+        cooldowns.record("animegg", 1, 1.0, SourceFailureKind.TIMEOUT)
+        assertTrue(cooldowns.coolingProviders(2, 1.0, listOf("animegg")).isEmpty())
+
+        now += 1_000L
+        cooldowns.record("animegg", 2, 1.0, SourceFailureKind.TIMEOUT)
+
+        assertEquals(setOf("animegg"), cooldowns.coolingProviders(3, 1.0, listOf("animegg")))
+        assertTrue(cooldowns.coolingProviders(3, 1.0, listOf("kaa")).isEmpty())
+    }
+
+    @Test
+    fun `successful provider resolution closes its global circuit breaker`() {
+        var now = 1_000L
+        val cooldowns = SourceFailureCooldowns { now }
+        cooldowns.record("animegg", 1, 1.0, SourceFailureKind.TIMEOUT)
+        cooldowns.record("animegg", 2, 1.0, SourceFailureKind.TIMEOUT)
+
+        cooldowns.clearResolved("animegg", 3, 1.0)
+
+        assertTrue(cooldowns.coolingProviders(4, 1.0, listOf("animegg")).isEmpty())
+    }
+
+    @Test
     fun `stalled preferred provider times out and falls through to next source`() = runBlocking {
         val attempts = mutableListOf<String>()
         val timedOut = mutableListOf<String>()

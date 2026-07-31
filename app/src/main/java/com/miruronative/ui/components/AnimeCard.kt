@@ -65,7 +65,9 @@ fun AnimeCard(
         ) {
             // Decorative: the title text below is part of the same merged semantics node.
             AsyncImage(
-                model = media.coverImage.best,
+                // AniList's `large` rendition is already larger than these poster cards. Avoid
+                // downloading `extraLarge` for every small rail/grid item on data-limited devices.
+                model = media.coverImage.large ?: media.coverImage.extraLarge,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,

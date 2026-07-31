@@ -99,7 +99,7 @@ class DiagnosticsHttpEventListener private constructor(private val callId: Long)
     }
 
     override fun callFailed(call: Call, ioe: IOException) {
-        emit("http.call.failed", ioe)
+        emit(httpCallOutcomeName(call.isCanceled(), ioe.message), ioe)
     }
 
     private fun emit(name: String, failure: IOException?) {
@@ -137,3 +137,10 @@ class DiagnosticsHttpEventListener private constructor(private val callId: Long)
         override fun create(call: Call): EventListener = DiagnosticsHttpEventListener(ids.incrementAndGet())
     }
 }
+
+internal fun httpCallOutcomeName(callCanceled: Boolean, failureMessage: String?): String =
+    if (callCanceled || failureMessage.equals("Canceled", ignoreCase = true)) {
+        "http.call.canceled"
+    } else {
+        "http.call.failed"
+    }

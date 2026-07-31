@@ -1,6 +1,7 @@
 package com.miruronative.ui.watch
 
 import android.view.KeyEvent
+import androidx.media3.common.PlaybackException
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.model.Category
 import com.miruronative.data.model.EpisodeItem
@@ -252,6 +253,57 @@ class WatchSourcePolicyTest {
         assertEquals(720, declaredVideoHeight("720P"))
         assertEquals(360, declaredVideoHeight("360p Data Saver"))
         assertEquals(null, declaredVideoHeight("AllAnime auto"))
+    }
+
+    @Test
+    fun `audio decoder failure skips ineffective video resolution retry`() {
+        assertEquals(
+            false,
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                rendererName = "MediaCodecAudioRenderer",
+                sampleMimeType = "audio/mp4a-latm",
+                errorMessage = "Decoder failed: c2.android.aac.decoder",
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                rendererName = null,
+                sampleMimeType = null,
+                errorMessage = "MediaCodecAudioRenderer error",
+            ),
+        )
+    }
+
+    @Test
+    fun `video decoder failure retains one lower resolution recovery`() {
+        assertTrue(
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                rendererName = "MediaCodecVideoRenderer",
+                sampleMimeType = "video/avc",
+                errorMessage = "Decoder failed",
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = 2_002,
+                rendererName = "MediaCodecVideoRenderer",
+                sampleMimeType = "video/avc",
+                errorMessage = "Network error",
+            ),
+        )
+    }
+
+    @Test
+    fun `automatic source validation is bounded while explicit validation is exhaustive`() {
+        assertEquals(1, sourceValidationConcurrency(isTv = true))
+        assertEquals(2, sourceValidationConcurrency(isTv = false))
+        assertEquals(6, sourceValidationCandidateLimit(exhaustive = false))
+        assertEquals(Int.MAX_VALUE, sourceValidationCandidateLimit(exhaustive = true))
     }
 
     @Test

@@ -91,7 +91,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.miruronative.R
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
@@ -614,22 +613,6 @@ private fun HeroPager(
             pagerState.animateScrollToPage(nextHeroPage(pagerState.settledPage, items.size))
         }
     }
-    // Pre-load upcoming hero banner images into Coil memory cache for seamless swipe transitions.
-    // Skipped on TV to conserve RAM (TV only renders one hero at a time anyway).
-    if (!device.isTv) {
-        val context = LocalContext.current
-        LaunchedEffect(heroIds) {
-            val loader = coil.Coil.imageLoader(context)
-            items.take(3).forEach { media ->
-                val url = media.heroImage
-                if (url != null) {
-                    loader.enqueue(
-                        ImageRequest.Builder(context).data(url).crossfade(false).build(),
-                    )
-                }
-            }
-        }
-    }
     Box(
         Modifier
             .fillMaxWidth()
@@ -659,6 +642,8 @@ private fun HeroPager(
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
+                // Compose only the adjacent page. AsyncImage then requests at the actual hero
+                // constraints instead of an eager preload downloading three original-size files.
                 beyondViewportPageCount = 1,
                 key = { page -> items[page].id },
             ) { page ->
@@ -720,18 +705,11 @@ private fun HeroCard(
     onFocusChanged: (Boolean) -> Unit = {},
 ) {
     val device = LocalAppDeviceProfile.current
-    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val heroImage = media.heroImage
-    val heroImageRequest = remember(heroImage) {
-        ImageRequest.Builder(context)
-            .data(heroImage)
-            .crossfade(false)
-            .build()
-    }
     Box(Modifier.fillMaxSize()) {
         AsyncImage(
-            model = heroImageRequest,
+            model = heroImage,
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,

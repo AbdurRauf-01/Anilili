@@ -166,6 +166,7 @@ class WatchViewModel : ViewModel() {
     private var anivexaMergeJob: Job? = null
     private var miruroLateMergeJob: Job? = null
     private var sourceValidationJob: Job? = null
+    private var sourceValidationIsExhaustive = false
     private var skipLookupJob: Job? = null
     private var skipLookupKey: SkipLookupKey? = null
     private var mergedIncludesAnivexa = false
@@ -202,6 +203,7 @@ class WatchViewModel : ViewModel() {
         anivexaMergeJob?.cancel()
         miruroLateMergeJob?.cancel()
         sourceValidationJob?.cancel()
+        sourceValidationIsExhaustive = false
         // Runs beside source resolution: providers hand back bare numbered lists, so without this
         // the episode list here reads "Episode 5" where the Anime page shows the real title.
         episodeMetaJob = viewModelScope.launch { loadEpisodeMetadata(id) }
@@ -853,6 +855,8 @@ class WatchViewModel : ViewModel() {
     /** All episode resolution goes through here so a failure becomes an error state, not a crash. */
     private fun launchResolve(number: Double, before: (suspend () -> Unit)? = null) {
         DiagnosticsLog.event("Watch launchResolve episode=${fmt(number)}")
+        sourceValidationJob?.cancel()
+        sourceValidationIsExhaustive = false
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
             try {
@@ -870,9 +874,10 @@ class WatchViewModel : ViewModel() {
     fun onPlaybackError(message: String, streamUrl: String, positionMs: Long) {
         val data = (_state.value as? UiState.Success)?.data ?: return
         if (data.isResolving) return
+        val streamHost = runCatching { Uri.parse(streamUrl).host }.getOrNull()
         DiagnosticsLog.event(
             "Watch playback error provider=${data.provider} episode=${data.current.displayNumber} " +
-                "streamHost=${runCatching { Uri.parse(streamUrl).host }.getOrNull() ?: "unknown"} " +
+                "streamHost=${streamHost ?: "unknown"} " +
                 "positionMs=$positionMs message=${message.take(160)}",
         )
 
@@ -913,6 +918,16 @@ class WatchViewModel : ViewModel() {
             DiagnosticsLog.event("Watch ignored duplicate provider failure provider=${data.provider}")
             return
         }
+        // A validation resolve proves only that a URL exists. Stop it before recording the player
+        // failure so a concurrent successful lookup cannot make the broken stream selectable again.
+        sourceValidationJob?.cancel()
+        repo.recordPlaybackFailure(
+            anilistId = data.anilistId,
+            number = data.current.number,
+            provider = data.provider,
+            streamHost = streamHost,
+            message = message,
+        )
         unavailableSources += EpisodeSourceKey(data.current.number, data.provider, data.category)
         launchResolve(data.current.number) {
             _state.value = UiState.Success(
@@ -948,6 +963,13 @@ class WatchViewModel : ViewModel() {
     fun capabilitiesFor(provider: String, category: Category): SourceCapabilities =
         sourceCapabilities[provider to category] ?: SourceCapabilities()
 
+    /** Finish the slower provider sweep only when the user asks to see every server. */
+    fun validateRemainingSources() {
+        val data = (_state.value as? UiState.Success)?.data ?: return
+        if (data.isResolving) return
+        launchSourceValidation(data.current.number, exhaustive = true)
+    }
+
     private fun sourceOptions(number: Double): List<WatchSourceOption> =
         visibleSourceOptions(
             candidates = availableSourceOptions(mergedEpisodes, number),
@@ -960,20 +982,39 @@ class WatchViewModel : ViewModel() {
      * those rows in small parallel batches and publish only confirmed server/audio pairs; this
      * keeps the picker truthful without delaying the first playable provider.
      */
-    private fun launchSourceValidation(number: Double) {
+    private fun launchSourceValidation(number: Double, exhaustive: Boolean = false) {
+        if (sourceValidationIsExhaustive && sourceValidationJob?.isActive == true) {
+            return
+        }
         sourceValidationJob?.cancel()
+        sourceValidationIsExhaustive = exhaustive
         sourceValidationJob = viewModelScope.launch {
-            // TV sticks have ~1GB RAM and validation is heavy. Give playback a head start and go
-            // one server at a time there. Providers that would launch a hidden player are omitted
-            // on every device below; selecting one explicitly still resolves it normally.
-            val validationConcurrency = if (AppGraph.isTv) 1 else SOURCE_VALIDATION_CONCURRENCY
-            if (AppGraph.isTv) kotlinx.coroutines.delay(10_000)
-            val candidates = availableSourceOptions(mergedEpisodes, number).filter { option ->
+            // Validation is useful for a truthful picker but competes with video startup. Every
+            // device gives playback a head start; phones use two probes at once and low-RAM TVs one.
+            // The automatic pass stops after two fallbacks (or six attempts). Opening the source
+            // picker explicitly requests the remaining options.
+            if (!exhaustive) kotlinx.coroutines.delay(SOURCE_VALIDATION_START_DELAY_MS)
+            val validationConcurrency = sourceValidationConcurrency(AppGraph.isTv)
+            val allOptions = availableSourceOptions(mergedEpisodes, number)
+            val activeProvider = (_state.value as? UiState.Success)?.data?.provider
+            val confirmedFallbackProviders = allOptions
+                .filter { option ->
+                    option.provider != activeProvider &&
+                        EpisodeSourceKey(number, option.provider, option.category) in confirmedSources
+                }
+                .mapTo(mutableSetOf(), WatchSourceOption::provider)
+            val fallbackTarget = if (exhaustive) {
+                Int.MAX_VALUE
+            } else {
+                (SOURCE_VALIDATION_FALLBACK_TARGET - confirmedFallbackProviders.size).coerceAtLeast(0)
+            }
+            val candidates = allOptions.filter { option ->
                 val key = EpisodeSourceKey(number, option.provider, option.category)
                 if (key in confirmedSources || key in unavailableSources) return@filter false
-                validatesDuringPlayback(option.provider)
-            }
-            if (candidates.isEmpty()) {
+                validatesDuringPlayback(option.provider) &&
+                    (exhaustive || option.provider != activeProvider)
+            }.take(sourceValidationCandidateLimit(exhaustive))
+            if (candidates.isEmpty() || fallbackTarget == 0) {
                 val data = (_state.value as? UiState.Success)?.data
                 if (data != null && data.current.number == number && mergedIncludesAnivexa) {
                     _state.value = UiState.Success(data.copy(isLoadingMoreSources = false))
@@ -986,6 +1027,7 @@ class WatchViewModel : ViewModel() {
                 _state.value = UiState.Success(initial.copy(isLoadingMoreSources = true))
             }
             val providerNames = mergedEpisodes.providerNames.toSet()
+            val newlyConfirmedFallbackProviders = mutableSetOf<String>()
             candidates.chunked(validationConcurrency).forEachIndexed { batchIndex, batch ->
                 val results = batch.map { option ->
                     async {
@@ -1025,9 +1067,14 @@ class WatchViewModel : ViewModel() {
                         unavailableSources += key
                     }
                 }
+                results.filter { (_, available) -> available }
+                    .mapTo(newlyConfirmedFallbackProviders) { (option, _) -> option.provider }
                 val data = (_state.value as? UiState.Success)?.data ?: return@launch
                 if (data.current.number != number) return@launch
-                val hasMore = (batchIndex + 1) * validationConcurrency < candidates.size
+                val reachedTarget = !exhaustive &&
+                    newlyConfirmedFallbackProviders.size >= fallbackTarget
+                val hasMore = !reachedTarget &&
+                    (batchIndex + 1) * validationConcurrency < candidates.size
                 _state.value = UiState.Success(
                     data.copy(
                         sourceOptions = sourceOptions(number),
@@ -1035,6 +1082,14 @@ class WatchViewModel : ViewModel() {
                         isLoadingMoreSources = !mergedIncludesAnivexa || hasMore,
                     ),
                 )
+                if (reachedTarget) {
+                    DiagnosticsLog.event(
+                        "Watch source validation paused episode=${fmt(number)} " +
+                            "confirmedFallbacks=" +
+                            "${confirmedFallbackProviders.size + newlyConfirmedFallbackProviders.size}",
+                    )
+                    return@launch
+                }
             }
         }
     }
@@ -1095,7 +1150,14 @@ internal fun shouldSyncAniListProgress(episodeNumber: Double, positionMs: Long, 
 
 private const val MIN_ANILIST_SYNC_DURATION_MS = 60_000L
 private const val ANILIST_SYNC_WATCHED_FRACTION = 0.80
-private const val SOURCE_VALIDATION_CONCURRENCY = 4
+private const val SOURCE_VALIDATION_START_DELAY_MS = 10_000L
+private const val SOURCE_VALIDATION_FALLBACK_TARGET = 2
+private const val SOURCE_VALIDATION_MAX_AUTOMATIC_ATTEMPTS = 6
+
+internal fun sourceValidationConcurrency(isTv: Boolean): Int = if (isTv) 1 else 2
+
+internal fun sourceValidationCandidateLimit(exhaustive: Boolean): Int =
+    if (exhaustive) Int.MAX_VALUE else SOURCE_VALIDATION_MAX_AUTOMATIC_ATTEMPTS
 
 private fun SkipTimes?.diagnosticSummary(): String = this?.let {
     "intro=${it.introStart ?: "none"}-${it.introEnd ?: "none"} " +

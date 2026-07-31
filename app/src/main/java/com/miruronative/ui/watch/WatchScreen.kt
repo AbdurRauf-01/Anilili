@@ -315,7 +315,7 @@ fun WatchScreen(
                 LoadingBox(
                     message = loadingStatus ?: if (showSlowNote) {
                         "Finding a source for this episode.\n" +
-                            "The first time you open a title we check every server, so it can take a few seconds."
+                            "The first playable server starts now; more options are checked after playback begins."
                     } else {
                         null
                     },
@@ -355,6 +355,7 @@ fun WatchScreen(
                     onNext = vm::next,
                     onChangeSource = vm::changeSource,
                     onChangeCategory = vm::changeCategory,
+                    onRequestAllSources = vm::validateRemainingSources,
                     onSelectEpisode = { index ->
                         if (device.isTv) fullscreen = true
                         vm.playIndex(index)
@@ -396,6 +397,7 @@ private fun WatchContent(
     onNext: () -> Unit,
     onChangeSource: (String, String) -> Unit,
     onChangeCategory: (String) -> Unit,
+    onRequestAllSources: () -> Unit,
     onSelectEpisode: (Int) -> Unit,
     onWebFallback: () -> Unit,
     onToggleFullscreen: () -> Unit,
@@ -876,6 +878,7 @@ private fun WatchContent(
                 focusRequester = sourceFocus,
                 onChangeSource = onChangeSource,
                 onChangeCategory = onChangeCategory,
+                onRequestAllSources = onRequestAllSources,
                 onSelectEpisode = onSelectEpisode,
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
@@ -935,6 +938,7 @@ private fun WatchContent(
                     data = data,
                     onChangeSource = onChangeSource,
                     onChangeCategory = onChangeCategory,
+                    onRequestAllSources = onRequestAllSources,
                     focusRequester = sourceFocus,
                     onToggleFullscreen = onToggleFullscreen,
                     downFocus = tvBrowserFocus.takeIf { tvBrowserVisible },
@@ -1587,6 +1591,7 @@ private fun MobileWatchDetails(
     focusRequester: FocusRequester,
     onChangeSource: (String, String) -> Unit,
     onChangeCategory: (String) -> Unit,
+    onRequestAllSources: () -> Unit,
     onSelectEpisode: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1641,6 +1646,7 @@ private fun MobileWatchDetails(
                 data = data,
                 onChangeSource = onChangeSource,
                 onChangeCategory = onChangeCategory,
+                onRequestAllSources = onRequestAllSources,
                 focusRequester = focusRequester,
             )
             data.notice?.let { notice ->
@@ -1824,6 +1830,7 @@ private fun SourceSelectors(
     data: WatchData,
     onChangeSource: (String, String) -> Unit,
     onChangeCategory: (String) -> Unit,
+    onRequestAllSources: () -> Unit,
     focusRequester: FocusRequester,
     onToggleFullscreen: (() -> Unit)? = null,
     // Where the D-pad should go when leaving this row downwards. The episode browser below is
@@ -1878,7 +1885,10 @@ private fun SourceSelectors(
             downloadable = ProviderCatalog.supportsOfflineDownload(data.provider),
             enabled = servers.isNotEmpty(),
             focusRequester = focusRequester,
-            onClick = { showServerDialog = true }
+            onClick = {
+                onRequestAllSources()
+                showServerDialog = true
+            }
         )
         val alternateAudio = audioForServer.firstOrNull { it != data.category }
         CompactClickablePill(

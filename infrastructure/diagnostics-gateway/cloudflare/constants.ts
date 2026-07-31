@@ -1,7 +1,9 @@
 import type { DiagnosticTrigger } from "./types";
 
 export const MAX_COMPRESSED_BYTES = 25_000_000;
-export const MAX_MULTIPART_BYTES = MAX_COMPRESSED_BYTES + 64_000;
+export const MAX_SCREENSHOT_BYTES = 5_000_000;
+export const MAX_DESCRIPTION_CHARS = 2_000;
+export const MAX_MULTIPART_BYTES = MAX_COMPRESSED_BYTES + MAX_SCREENSHOT_BYTES + 128_000;
 export const MAX_EXPANDED_BYTES = 50_000_000;
 export const MAX_ZIP_ENTRIES = 64;
 export const MAX_REPORTS_PER_IP_HOUR = 8;

@@ -12,6 +12,9 @@ interface ReportMetadata {
   expandedBytes: number;
   entryCount: number;
   manifestVersion: string;
+  description?: string;
+  screenshotBytes?: number;
+  screenshotContentType?: "image/jpeg" | "image/png" | "image/webp";
 }
 
 interface ReportResponse {
@@ -155,7 +158,8 @@ function Dashboard({ onSignedOut }: { onSignedOut: () => void }) {
     const needle = query.trim().toLowerCase();
     return (payload?.reports ?? []).filter((report) => {
       const matchesTrigger = trigger === "all" || report.trigger === trigger;
-      const haystack = `${report.reportId} ${report.appVersion} ${report.versionCode} ${report.buildSha} ${report.platform}`.toLowerCase();
+      const haystack = `${report.reportId} ${report.appVersion} ${report.versionCode} ` +
+        `${report.buildSha} ${report.platform} ${report.description ?? ""}`.toLowerCase();
       return matchesTrigger && (!needle || haystack.includes(needle));
     });
   }, [payload, query, trigger]);
@@ -251,8 +255,28 @@ function Dashboard({ onSignedOut }: { onSignedOut: () => void }) {
               <div className="report-fact"><span>Archive</span><strong>{formatBytes(report.receivedBytes)} · {report.entryCount} files</strong></div>
               <div className="report-actions">
                 <a href={`/api/admin/reports/${report.reportId}/download`}>Download</a>
+                {report.screenshotBytes && (
+                  <a
+                    href={`/api/admin/reports/${report.reportId}/screenshot`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Screenshot
+                  </a>
+                )}
                 <button onClick={() => void remove(report.reportId)} aria-label={`Delete ${report.reportId}`}>Delete</button>
               </div>
+              {(report.description || report.screenshotBytes) && (
+                <div className="report-context">
+                  <span>User context</span>
+                  <p>{report.description || "Screenshot attached without a written description."}</p>
+                  {report.screenshotBytes && (
+                    <small>
+                      Screenshot · {formatBytes(report.screenshotBytes)} · {report.screenshotContentType}
+                    </small>
+                  )}
+                </div>
+              )}
             </article>
           ))}
         </div>

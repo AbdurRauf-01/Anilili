@@ -77,15 +77,31 @@ export class HfReportStore {
     return matches.some((object) => object.key === key);
   }
 
-  async putReport(reportId: string, report: File, metadata: ReportMetadata): Promise<void> {
+  async putReport(
+    reportId: string,
+    report: File,
+    screenshot: File | null,
+    metadata: ReportMetadata,
+  ): Promise<void> {
     const prefix = reportPrefix(reportId);
+    const uploaded: string[] = [];
     const zipResponse = await this.signedFetch(this.objectUrl(`${prefix}.zip`), {
       method: "PUT",
       headers: { "Content-Type": "application/zip" },
       body: report,
     });
     ensureStorageResponse(zipResponse, "upload");
+    uploaded.push(`${prefix}.zip`);
     try {
+      if (screenshot) {
+        const screenshotResponse = await this.signedFetch(this.objectUrl(`${prefix}.screenshot`), {
+          method: "PUT",
+          headers: { "Content-Type": screenshot.type },
+          body: screenshot,
+        });
+        ensureStorageResponse(screenshotResponse, "screenshot upload");
+        uploaded.push(`${prefix}.screenshot`);
+      }
       const metadataResponse = await this.signedFetch(this.objectUrl(`${prefix}.json`), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -93,7 +109,7 @@ export class HfReportStore {
       });
       ensureStorageResponse(metadataResponse, "metadata upload");
     } catch (error) {
-      await this.deleteObject(`${prefix}.zip`).catch(() => undefined);
+      await Promise.all(uploaded.map((key) => this.deleteObject(key).catch(() => undefined)));
       throw error;
     }
   }
@@ -107,9 +123,22 @@ export class HfReportStore {
     return ensureStorageResponse(response, "download");
   }
 
+  async getScreenshot(reportId: string): Promise<Response | null> {
+    const response = await this.signedFetch(this.objectUrl(`${reportPrefix(reportId)}.screenshot`));
+    if (response.status === 404) {
+      void response.body?.cancel();
+      return null;
+    }
+    return ensureStorageResponse(response, "screenshot download");
+  }
+
   async deleteReport(reportId: string): Promise<void> {
     const prefix = reportPrefix(reportId);
-    await Promise.all([this.deleteObject(`${prefix}.zip`), this.deleteObject(`${prefix}.json`)]);
+    await Promise.all([
+      this.deleteObject(`${prefix}.zip`),
+      this.deleteObject(`${prefix}.json`),
+      this.deleteObject(`${prefix}.screenshot`),
+    ]);
   }
 
   async listObjects(prefix: string, maximum = 1_000): Promise<StoredObject[]> {

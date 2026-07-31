@@ -15,6 +15,8 @@ import type {
   DailyUsage,
   ReportMetadata,
   ReportStore,
+  ScreenshotUpload,
+  StoredScreenshot,
 } from "./types.js";
 
 interface S3StoreConfig {
@@ -78,8 +80,14 @@ export class S3ReportStore implements ReportStore {
     }
   }
 
-  async putReport(reportId: string, zipPath: string, metadata: ReportMetadata): Promise<void> {
+  async putReport(
+    reportId: string,
+    zipPath: string,
+    screenshot: ScreenshotUpload | null,
+    metadata: ReportMetadata,
+  ): Promise<void> {
     const prefix = reportPrefix(reportId);
+    const uploaded: string[] = [];
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
@@ -88,7 +96,19 @@ export class S3ReportStore implements ReportStore {
         ContentType: "application/zip",
       }),
     );
+    uploaded.push(`${prefix}.zip`);
     try {
+      if (screenshot) {
+        await this.client.send(
+          new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: `${prefix}.screenshot`,
+            Body: createReadStream(screenshot.path),
+            ContentType: screenshot.contentType,
+          }),
+        );
+        uploaded.push(`${prefix}.screenshot`);
+      }
       await this.client.send(
         new PutObjectCommand({
           Bucket: this.bucket,
@@ -98,9 +118,9 @@ export class S3ReportStore implements ReportStore {
         }),
       );
     } catch (error) {
-      await this.client
-        .send(new DeleteObjectCommand({ Bucket: this.bucket, Key: `${prefix}.zip` }))
-        .catch(() => undefined);
+      await Promise.all(uploaded.map((key) =>
+        this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })).catch(() => undefined),
+      ));
       throw error;
     }
   }
@@ -135,21 +155,41 @@ export class S3ReportStore implements ReportStore {
     }
   }
 
+  async getScreenshot(reportId: string): Promise<StoredScreenshot | null> {
+    try {
+      const response = await this.client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: `${reportPrefix(reportId)}.screenshot` }),
+      );
+      return {
+        bytes: await bodyToBuffer(response.Body),
+        contentType: response.ContentType ?? "application/octet-stream",
+      };
+    } catch (error) {
+      const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+      if (status === 404) return null;
+      throw error;
+    }
+  }
+
   async deleteReport(reportId: string): Promise<boolean> {
     const existed = await this.hasReport(reportId);
     const prefix = reportPrefix(reportId);
     await Promise.all([
       this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: `${prefix}.zip` })),
       this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: `${prefix}.json` })),
+      this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: `${prefix}.screenshot` })),
     ]);
     return existed;
   }
 
   async dailyUsage(day: string): Promise<DailyUsage> {
-    const objects = (await this.listAll(dayPrefix(day))).filter((object) => object.Key?.endsWith(".zip"));
+    const objects = await this.listAll(dayPrefix(day));
+    const reports = objects.filter((object) => object.Key?.endsWith(".zip"));
     return {
-      reports: objects.length,
-      bytes: objects.reduce((total, object) => total + (object.Size ?? 0), 0),
+      reports: reports.length,
+      bytes: objects
+        .filter((object) => object.Key?.endsWith(".zip") || object.Key?.endsWith(".screenshot"))
+        .reduce((total, object) => total + (object.Size ?? 0), 0),
     };
   }
 
@@ -202,14 +242,21 @@ export class FileSystemReportStore implements ReportStore {
     return stat(this.pathFor(reportId, "zip")).then(() => true, () => false);
   }
 
-  async putReport(reportId: string, zipPath: string, metadata: ReportMetadata): Promise<void> {
+  async putReport(
+    reportId: string,
+    zipPath: string,
+    screenshot: ScreenshotUpload | null,
+    metadata: ReportMetadata,
+  ): Promise<void> {
     const destination = this.pathFor(reportId, "zip");
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(zipPath, destination);
     try {
+      if (screenshot) await copyFile(screenshot.path, this.pathFor(reportId, "screenshot"));
       await writeFile(this.pathFor(reportId, "json"), JSON.stringify(metadata), "utf8");
     } catch (error) {
       await unlink(destination).catch(() => undefined);
+      await unlink(this.pathFor(reportId, "screenshot")).catch(() => undefined);
       throw error;
     }
   }
@@ -234,11 +281,24 @@ export class FileSystemReportStore implements ReportStore {
     });
   }
 
+  async getScreenshot(reportId: string): Promise<StoredScreenshot | null> {
+    const metadata = (await this.listReports(Number.MAX_SAFE_INTEGER))
+      .find((report) => report.reportId === reportId);
+    if (!metadata?.screenshotContentType) return null;
+    return readFile(this.pathFor(reportId, "screenshot"))
+      .then((bytes) => ({ bytes, contentType: metadata.screenshotContentType! }))
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+  }
+
   async deleteReport(reportId: string): Promise<boolean> {
     const existed = await this.hasReport(reportId);
     await Promise.all([
       unlink(this.pathFor(reportId, "zip")).catch(() => undefined),
       unlink(this.pathFor(reportId, "json")).catch(() => undefined),
+      unlink(this.pathFor(reportId, "screenshot")).catch(() => undefined),
     ]);
     return existed;
   }
@@ -249,7 +309,10 @@ export class FileSystemReportStore implements ReportStore {
     );
     return {
       reports: reports.length,
-      bytes: reports.reduce((total, report) => total + report.receivedBytes, 0),
+      bytes: reports.reduce(
+        (total, report) => total + report.receivedBytes + (report.screenshotBytes ?? 0),
+        0,
+      ),
     };
   }
 
@@ -257,19 +320,22 @@ export class FileSystemReportStore implements ReportStore {
     const reports = (await this.listReports(Number.MAX_SAFE_INTEGER)).sort((left, right) =>
       left.receivedUtc.localeCompare(right.receivedUtc),
     );
-    let retainedBytes = reports.reduce((total, report) => total + report.receivedBytes, 0);
+    let retainedBytes = reports.reduce(
+      (total, report) => total + report.receivedBytes + (report.screenshotBytes ?? 0),
+      0,
+    );
     let deletedReports = 0;
     for (const report of reports) {
       const expired = new Date(report.receivedUtc) < retentionBefore;
       if (!expired && retainedBytes <= maxStoredBytes) break;
       await this.deleteReport(report.reportId);
-      retainedBytes -= report.receivedBytes;
+      retainedBytes -= report.receivedBytes + (report.screenshotBytes ?? 0);
       deletedReports += 1;
     }
     return { deletedReports, retainedBytes };
   }
 
-  private pathFor(reportId: string, extension: "zip" | "json"): string {
+  private pathFor(reportId: string, extension: "zip" | "json" | "screenshot"): string {
     return join(this.root, `${reportPrefix(reportId)}.${extension}`);
   }
 }

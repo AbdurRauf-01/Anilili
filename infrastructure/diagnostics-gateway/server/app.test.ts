@@ -10,10 +10,16 @@ import type {
   DailyUsage,
   ReportMetadata,
   ReportStore,
+  ScreenshotUpload,
+  StoredScreenshot,
 } from "./types.js";
 
 class MemoryReportStore implements ReportStore {
-  readonly reports = new Map<string, { zip: Buffer; metadata: ReportMetadata }>();
+  readonly reports = new Map<string, {
+    zip: Buffer;
+    screenshot: StoredScreenshot | null;
+    metadata: ReportMetadata;
+  }>();
 
   async healthCheck(): Promise<void> {}
 
@@ -21,8 +27,19 @@ class MemoryReportStore implements ReportStore {
     return this.reports.has(reportId);
   }
 
-  async putReport(reportId: string, zipPath: string, metadata: ReportMetadata): Promise<void> {
-    this.reports.set(reportId, { zip: await readFile(zipPath), metadata });
+  async putReport(
+    reportId: string,
+    zipPath: string,
+    screenshot: ScreenshotUpload | null,
+    metadata: ReportMetadata,
+  ): Promise<void> {
+    this.reports.set(reportId, {
+      zip: await readFile(zipPath),
+      screenshot: screenshot
+        ? { bytes: await readFile(screenshot.path), contentType: screenshot.contentType }
+        : null,
+      metadata,
+    });
   }
 
   async listReports(limit: number): Promise<ReportMetadata[]> {
@@ -34,6 +51,10 @@ class MemoryReportStore implements ReportStore {
 
   async getReport(reportId: string): Promise<Buffer | null> {
     return this.reports.get(reportId)?.zip ?? null;
+  }
+
+  async getScreenshot(reportId: string): Promise<StoredScreenshot | null> {
+    return this.reports.get(reportId)?.screenshot ?? null;
   }
 
   async deleteReport(reportId: string): Promise<boolean> {
@@ -78,6 +99,10 @@ function reportRequest(app: ReturnType<typeof createApp>, reportId: string, arch
     .attach("report", archive, { filename: `${reportId}.zip`, contentType: "application/zip" });
 }
 
+const PNG_SCREENSHOT = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00,
+]);
+
 describe("diagnostic gateway", () => {
   let store: MemoryReportStore;
   let app: ReturnType<typeof createApp>;
@@ -120,6 +145,30 @@ describe("diagnostic gateway", () => {
     expect((await reportRequest(app, "ANL-20260730-ABC123DE45")).status).toBe(200);
     expect((await reportRequest(app, "ANL-20260730-ABC123DE45")).status).toBe(200);
     expect(store.reports.size).toBe(1);
+  });
+
+  it("stores redacted user context and an optional screenshot", async () => {
+    const reportId = "ANL-20260730-CONTXT0001";
+    const response = await request(app)
+      .post("/v1/reports")
+      .field("report_id", reportId)
+      .field("trigger", "manual")
+      .field("app_version", "0.1.51")
+      .field("version_code", "52")
+      .field("build_sha", "abcdef123456")
+      .field("platform", "android")
+      .field("description", "Playback froze. password=do-not-store")
+      .attach("screenshot", PNG_SCREENSHOT, { filename: "screen.png", contentType: "image/png" })
+      .attach("report", diagnosticZip(), { filename: `${reportId}.zip`, contentType: "application/zip" });
+
+    expect(response.status).toBe(200);
+    const stored = store.reports.get(reportId);
+    expect(stored?.metadata).toMatchObject({
+      description: "Playback froze. password=<redacted>",
+      screenshotBytes: PNG_SCREENSHOT.length,
+      screenshotContentType: "image/png",
+    });
+    expect(stored?.screenshot?.bytes).toEqual(PNG_SCREENSHOT);
   });
 
   it("rejects an archive containing an unredacted cookie", async () => {

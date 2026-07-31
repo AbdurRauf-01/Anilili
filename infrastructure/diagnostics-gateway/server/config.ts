@@ -2,6 +2,8 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 export const MAX_COMPRESSED_BYTES = 25_000_000;
+export const MAX_SCREENSHOT_BYTES = 5_000_000;
+export const MAX_DESCRIPTION_CHARS = 2_000;
 export const MAX_EXPANDED_BYTES = 50_000_000;
 export const MAX_ZIP_ENTRIES = 64;
 export const RETENTION_DAYS = 30;

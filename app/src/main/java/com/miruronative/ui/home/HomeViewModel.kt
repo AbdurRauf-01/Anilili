@@ -10,9 +10,13 @@ import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.data.model.Media
 import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+private const val HOME_LOAD_TIMEOUT_MS = 15_000L
 
 enum class HomeTab(val label: String) {
     NEWEST("NEWEST"),
@@ -43,6 +47,8 @@ class HomeViewModel : ViewModel() {
     val state = _state.asStateFlow()
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing = _isRefreshing.asStateFlow()
+    private var loadJob: Job? = null
+    private var loadGeneration = 0
 
     /** Per-section paging cursor. Rebuilt on every load so a refresh starts from page 1 again. */
     private class Paging {
@@ -77,11 +83,15 @@ class HomeViewModel : ViewModel() {
     fun selectTab(tab: HomeTab) { selectedTab = tab }
 
     fun load(force: Boolean = false) {
-        viewModelScope.launch {
+        val generation = ++loadGeneration
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             DiagnosticsLog.event("Home load start force=$force")
             if (force && _state.value is UiState.Success) _isRefreshing.value = true else _state.value = UiState.Loading
             try {
-                val collections = repo.homeCollections(force)
+                val collections = withTimeoutOrNull(HOME_LOAD_TIMEOUT_MS) {
+                    repo.homeCollections(force)
+                } ?: error("Home request timed out. Check the connection and try again.")
                 val data = HomeData(
                     spotlight = collections.spotlight,
                     newest = collections.newest,
@@ -105,7 +115,7 @@ class HomeViewModel : ViewModel() {
                 DiagnosticsLog.throwable("Home load failed", e)
                 _state.value = UiState.Error(e.message ?: "Failed to load home")
             } finally {
-                _isRefreshing.value = false
+                if (generation == loadGeneration) _isRefreshing.value = false
             }
         }
     }

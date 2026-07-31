@@ -9,6 +9,7 @@ import androidx.media3.datasource.TransferListener
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.util.Base64Compat
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
 @UnstableApi
@@ -18,6 +19,7 @@ internal class FlixcloudPlaylistDataSource(
 ) : DataSource {
     private var buffered: ByteArray? = null
     private var bufferedPosition = 0
+    private var bufferedLimit = 0
     private var upstreamOpen = false
     private var resolvedUri: Uri? = null
     private var responseHeaders: Map<String, List<String>> = emptyMap()
@@ -29,6 +31,7 @@ internal class FlixcloudPlaylistDataSource(
     override fun open(dataSpec: DataSpec): Long {
         buffered = null
         bufferedPosition = 0
+        bufferedLimit = 0
         resolvedUri = null
         responseHeaders = emptyMap()
 
@@ -41,41 +44,57 @@ internal class FlixcloudPlaylistDataSource(
             (path.endsWith(".png", ignoreCase = true) || path.endsWith(".webp", ignoreCase = true))
         if (key.isNullOrBlank() || (!isPlaylist && !isWrappedSegment)) return length
 
-        val raw = ByteArrayOutputStream().use { output ->
-            val chunk = ByteArray(8 * 1024)
-            while (true) {
-                val read = upstream.read(chunk, 0, chunk.size)
-                if (read == C.RESULT_END_OF_INPUT) break
-                if (read > 0) output.write(chunk, 0, read)
+        val maximumBytes = if (isPlaylist) MAX_PLAYLIST_BYTES else MAX_WRAPPED_SEGMENT_BYTES
+        val raw = try {
+            readBounded(length, maximumBytes)
+        } catch (error: Exception) {
+            if (upstreamOpen) {
+                upstreamOpen = false
+                runCatching { upstream.close() }
             }
-            output.toByteArray()
+            DiagnosticsLog.throwable(
+                "Flixcloud response rejected host=${dataSpec.uri.host ?: "unknown"} " +
+                    "kind=${if (isPlaylist) "playlist" else "segment"} limitBytes=$maximumBytes",
+                error,
+            )
+            throw error
         }
         resolvedUri = upstream.uri
         responseHeaders = upstream.responseHeaders
         upstream.close()
         upstreamOpen = false
 
-        val decoded = if (isPlaylist) {
-            decodeFlixcloudPlaylist(raw, key) ?: raw
+        val decoded: ByteArray
+        val decodedOffset: Int
+        if (isPlaylist) {
+            decoded = decodeFlixcloudPlaylist(raw, key) ?: raw
+            decodedOffset = 0
         } else {
-            decodeFlixcloudSegment(raw) ?: raw
+            decoded = raw
+            decodedOffset = unwrapFlixcloudSegmentInPlace(raw) ?: 0
         }
-        if (decoded !== raw) {
-            if (isPlaylist || segmentLogCount.getAndIncrement() < 3) {
+        val wasDecoded = decoded !== raw || decodedOffset > 0
+        if (wasDecoded) {
+            val decodedBytes = decoded.size - decodedOffset
+            val unusuallyLarge = decodedBytes >= LARGE_SEGMENT_LOG_BYTES
+            if (isPlaylist || unusuallyLarge || segmentLogCount.getAndIncrement() < 3) {
                 DiagnosticsLog.event(
                     "Flixcloud ${if (isPlaylist) "playlist decoded" else "segment unwrapped"} " +
-                        "host=${dataSpec.uri.host ?: "unknown"} bytes=${decoded.size}",
+                        "host=${dataSpec.uri.host ?: "unknown"} bytes=$decodedBytes " +
+                        "transportBytes=${raw.size} large=$unusuallyLarge",
                 )
             }
         }
         buffered = decoded
-        return decoded.size.toLong()
+        bufferedPosition = decodedOffset
+        bufferedLimit = decoded.size
+        return (bufferedLimit - bufferedPosition).toLong()
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         val data = buffered ?: return upstream.read(buffer, offset, length)
-        if (bufferedPosition >= data.size) return C.RESULT_END_OF_INPUT
-        val count = minOf(length, data.size - bufferedPosition)
+        if (bufferedPosition >= bufferedLimit) return C.RESULT_END_OF_INPUT
+        val count = minOf(length, bufferedLimit - bufferedPosition)
         data.copyInto(buffer, offset, bufferedPosition, bufferedPosition + count)
         bufferedPosition += count
         return count
@@ -89,6 +108,7 @@ internal class FlixcloudPlaylistDataSource(
     override fun close() {
         buffered = null
         bufferedPosition = 0
+        bufferedLimit = 0
         resolvedUri = null
         responseHeaders = emptyMap()
         if (upstreamOpen) {
@@ -98,7 +118,41 @@ internal class FlixcloudPlaylistDataSource(
     }
 
     private companion object {
+        const val MAX_PLAYLIST_BYTES = 2 * 1_024 * 1_024
+        const val MAX_WRAPPED_SEGMENT_BYTES = 24 * 1_024 * 1_024
+        const val LARGE_SEGMENT_LOG_BYTES = 8 * 1_024 * 1_024
         val segmentLogCount = AtomicInteger(0)
+    }
+
+    private fun readBounded(reportedLength: Long, maximumBytes: Int): ByteArray {
+        if (reportedLength > maximumBytes) {
+            throw IOException("Flixcloud response exceeds the $maximumBytes byte safety limit")
+        }
+        if (reportedLength in 0..maximumBytes.toLong()) {
+            val expected = reportedLength.toInt()
+            val bytes = ByteArray(expected)
+            var position = 0
+            while (position < expected) {
+                val read = upstream.read(bytes, position, expected - position)
+                if (read == C.RESULT_END_OF_INPUT) break
+                if (read > 0) position += read
+            }
+            return if (position == expected) bytes else bytes.copyOf(position)
+        }
+        return ByteArrayOutputStream(64 * 1_024).use { output ->
+            val chunk = ByteArray(16 * 1_024)
+            while (true) {
+                val read = upstream.read(chunk, 0, chunk.size)
+                if (read == C.RESULT_END_OF_INPUT) break
+                if (read > 0) {
+                    if (output.size() + read > maximumBytes) {
+                        throw IOException("Flixcloud response exceeds the $maximumBytes byte safety limit")
+                    }
+                    output.write(chunk, 0, read)
+                }
+            }
+            output.toByteArray()
+        }
     }
 }
 
@@ -116,22 +170,41 @@ internal fun decodeFlixcloudPlaylist(payload: ByteArray, keyBase64: String): Byt
 }
 
 internal fun decodeFlixcloudSegment(payload: ByteArray): ByteArray? {
+    val mutable = payload.copyOf()
+    val headerSize = unwrapFlixcloudSegmentInPlace(mutable) ?: return null
+    return mutable.copyOfRange(headerSize, mutable.size)
+}
+
+private fun unwrapFlixcloudSegmentInPlace(payload: ByteArray): Int? {
     val headerSize = when {
-        payload.size >= 12 && payload.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) &&
-            payload.copyOfRange(8, 12).contentEquals("WEBP".toByteArray()) -> 12
-        payload.size >= 8 && payload.copyOfRange(0, 8).contentEquals(
+        payload.matchesAt(0, "RIFF".toByteArray()) && payload.matchesAt(8, "WEBP".toByteArray()) -> 12
+        payload.matchesAt(
+            0,
             byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
         ) -> 8
         else -> return null
     }
-    if (payload.size == headerSize) return ByteArray(0)
+    if (payload.size == headerSize) return headerSize
 
-    val segment = payload.copyOfRange(headerSize, payload.size)
-    if (segment.first().toInt() and 0xff == 0x47) return segment
-    segment.indices.forEach { index ->
-        segment[index] = (segment[index].toInt() xor segmentMask[index and 15].toInt()).toByte()
+    if (payload[headerSize].toInt() and 0xff == 0x47) return headerSize
+    for (index in headerSize until payload.size) {
+        payload[index] = (
+            payload[index].toInt() xor segmentMask[(index - headerSize) and 15].toInt()
+            ).toByte()
     }
-    return segment.takeIf { it.isNotEmpty() && (it.first().toInt() and 0xff) == 0x47 }
+    if (payload[headerSize].toInt() and 0xff == 0x47) return headerSize
+    // Restore unrecognised payloads so callers can pass the original response through unchanged.
+    for (index in headerSize until payload.size) {
+        payload[index] = (
+            payload[index].toInt() xor segmentMask[(index - headerSize) and 15].toInt()
+            ).toByte()
+    }
+    return null
+}
+
+private fun ByteArray.matchesAt(offset: Int, expected: ByteArray): Boolean {
+    if (offset < 0 || size - offset < expected.size) return false
+    return expected.indices.all { index -> this[offset + index] == expected[index] }
 }
 
 private val segmentMask = byteArrayOf(

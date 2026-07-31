@@ -99,6 +99,10 @@ body::before {
 .report-actions a, .report-actions button { padding: 9px 11px; border: 1px solid var(--line); background: transparent; color: var(--ink); text-decoration: none; cursor: pointer; font-size: 10px; }
 .report-actions a:hover { border-color: var(--acid); color: var(--acid); }
 .report-actions button:hover { border-color: var(--red); color: var(--red); }
+.report-context { grid-column: 2 / -1; padding: 12px 14px; border-left: 2px solid var(--cyan); background: rgba(126, 231, 255, .045); }
+.report-context span { color: var(--cyan); font-size: 9px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.report-context p { margin: 7px 0 0; color: #d9dfdc; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-context small { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; }
 .empty-state { padding: 60px 20px; border: 1px dashed #303737; text-align: center; }
 .empty-state span { color: var(--acid); font-size: 10px; letter-spacing: .2em; }
 .empty-state h3 { margin: 15px 0 8px; font-family: Georgia, serif; font-size: 30px; font-weight: 400; }
@@ -110,6 +114,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 6
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .report-row { grid-template-columns: 100px 1fr auto; }
   .report-fact { display: none; }
+  .report-context { grid-column: 1 / -1; }
 }
 
 @media (max-width: 620px) {

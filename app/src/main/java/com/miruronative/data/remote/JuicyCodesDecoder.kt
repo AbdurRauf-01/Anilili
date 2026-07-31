@@ -1,6 +1,7 @@
 package com.miruronative.data.remote
 
-import java.util.Base64
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
  * JuicyCodes (the `argon.*` embed host used by codedew's WatchMultiQuality links) obfuscates its
@@ -37,12 +38,13 @@ internal object JuicyCodesDecoder {
     }
 
     /** Decodes a blob from [extractBlob] into the embed's inline JavaScript source. */
+    @OptIn(ExperimentalEncodingApi::class)
     fun decode(blob: String): String {
         require(blob.length > 3) { "JuicyCodes blob too short" }
         val salt = blob.takeLast(3).map { (it.code - 100).toString() }.joinToString("").toInt()
         var body = blob.dropLast(3).replace('_', '+').replace('-', '/')
         body += "===".substring((body.length + 3) % 4)
-        val decoded = String(Base64.getDecoder().decode(body), Charsets.ISO_8859_1)
+        val decoded = String(Base64.decode(body), Charsets.ISO_8859_1)
         val digits = buildString(decoded.length) {
             decoded.forEach { ch ->
                 val index = SYMBOLS.indexOf(ch)

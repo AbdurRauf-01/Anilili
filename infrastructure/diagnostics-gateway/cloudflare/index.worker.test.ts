@@ -23,7 +23,10 @@ function reportZip(): Uint8Array {
   });
 }
 
-function uploadRequest(reportId = "ANL-20260730-ABC123DE45"): Request {
+function uploadRequest(
+  reportId = "ANL-20260730-ABC123DE45",
+  options: { description?: string; screenshot?: boolean; invalidScreenshot?: boolean } = {},
+): Request {
   const zip = reportZip();
   const form = new FormData();
   form.set("report_id", reportId);
@@ -32,6 +35,16 @@ function uploadRequest(reportId = "ANL-20260730-ABC123DE45"): Request {
   form.set("version_code", "52");
   form.set("build_sha", "abc1234");
   form.set("platform", "android");
+  if (options.description) form.set("description", options.description);
+  if (options.screenshot || options.invalidScreenshot) {
+    const screenshotBytes = options.invalidScreenshot
+      ? new Uint8Array([0x6e, 0x6f, 0x74, 0x2d, 0x61, 0x6e, 0x2d, 0x69, 0x6d, 0x61, 0x67, 0x65])
+      : new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    form.set(
+      "screenshot",
+      new File([screenshotBytes], "screen.png", { type: "image/png" }),
+    );
+  }
   form.set("report", new File([zip], `${reportId}.zip`, { type: "application/zip" }));
   return new IncomingRequest("https://diagnostics.example/v1/reports", {
     method: "POST",
@@ -73,6 +86,8 @@ describe("Cloudflare diagnostics gateway", () => {
       storage: "private-hf-bucket",
       retentionDays: 30,
     });
+    expect(Number(response.headers.get("X-Anilili-Instance-Age"))).toBeGreaterThanOrEqual(0);
+    expect(Number(response.headers.get("X-Anilili-Instance-Age"))).toBeLessThan(120);
     expect(outbound).toHaveBeenCalledTimes(1);
   });
 
@@ -106,6 +121,52 @@ describe("Cloudflare diagnostics gateway", () => {
     const response = await dispatch(request);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Invalid report reference" });
+  });
+
+  it("stores redacted user context and an optional screenshot", async () => {
+    const methods: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      methods.push(request.method);
+      if (request.method === "GET") {
+        return new Response("<ListBucketResult></ListBucketResult>", {
+          status: 200,
+          headers: { "Content-Type": "application/xml" },
+        });
+      }
+      return new Response(null, { status: 200 });
+    }));
+
+    const reportId = "ANL-20260730-CONTXT0001";
+    const response = await dispatch(uploadRequest(reportId, {
+      description: "Playback froze. cookie=do-not-store",
+      screenshot: true,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(methods).toEqual(["GET", "PUT", "PUT", "PUT"]);
+    const index = await env.RATE_LIMIT.list({ prefix: "report:" });
+    const metadata = await env.RATE_LIMIT.get<Record<string, unknown>>(index.keys[0].name, "json");
+    expect(metadata).toMatchObject({
+      description: "Playback froze. cookie=<redacted>",
+      screenshotBytes: 12,
+      screenshotContentType: "image/png",
+    });
+  });
+
+  it("rejects screenshot content that does not match the declared image type", async () => {
+    const outbound = vi.fn();
+    vi.stubGlobal("fetch", outbound);
+
+    const response = await dispatch(uploadRequest("ANL-20260730-BADIMAGE01", {
+      invalidScreenshot: true,
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Diagnostic screenshot must be a JPEG, PNG or WebP image",
+    });
+    expect(outbound).not.toHaveBeenCalled();
   });
 
   it("requires the configured administrator key and issues an HttpOnly cookie", async () => {

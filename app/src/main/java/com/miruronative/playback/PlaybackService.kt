@@ -1,5 +1,6 @@
 package com.miruronative.playback
 
+import android.app.ActivityManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.res.Configuration
@@ -43,6 +44,29 @@ object PlaybackStatus {
         _isPlaying.value = playing
     }
 }
+
+internal data class PlaybackBufferPolicy(
+    val minimumMs: Int,
+    val maximumMs: Int,
+    val playbackMs: Int,
+    val rebufferMs: Int,
+)
+
+internal fun playbackBufferPolicy(
+    isTv: Boolean,
+    isLowRamDevice: Boolean,
+    memoryClassMb: Int,
+): PlaybackBufferPolicy? =
+    if (isTv || isLowRamDevice || memoryClassMb <= 256) {
+        PlaybackBufferPolicy(
+            minimumMs = 10_000,
+            maximumMs = 30_000,
+            playbackMs = 1_500,
+            rebufferMs = 3_000,
+        )
+    } else {
+        null
+    }
 
 /**
  * Owns the app playback player so playback survives activity backgrounding and exposes Android
@@ -96,19 +120,33 @@ class PlaybackService : MediaSessionService() {
             }
         }
 
-        // Fire TV sticks have ~1GB of RAM and were getting killed by the low-memory killer mid
-        // episode: ExoPlayer's default ~50s buffer of 1080p HLS plus the app's WebViews exceed
-        // what the OS tolerates. A 30s cap keeps the buffer's memory (and network bursts)
-        // proportionate to the device; phones keep the defaults.
+        // Constrained phones can hit the same playback heap ceiling as Fire TV. Keep the default
+        // only on devices with a larger app memory class.
         val isTvDevice = (getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager)
             ?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
-        val loadControl = if (isTvDevice) {
+        val activityManager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val bufferPolicy = playbackBufferPolicy(
+            isTv = isTvDevice,
+            isLowRamDevice = activityManager.isLowRamDevice,
+            memoryClassMb = activityManager.memoryClass,
+        )
+        val loadControl = if (bufferPolicy != null) {
             androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                .setBufferDurationsMs(10_000, 30_000, 1_500, 3_000)
+                .setBufferDurationsMs(
+                    bufferPolicy.minimumMs,
+                    bufferPolicy.maximumMs,
+                    bufferPolicy.playbackMs,
+                    bufferPolicy.rebufferMs,
+                )
                 .build()
         } else {
             androidx.media3.exoplayer.DefaultLoadControl.Builder().build()
         }
+        DiagnosticsLog.event(
+            "PlaybackService buffer policy constrained=${bufferPolicy != null} " +
+                "tv=$isTvDevice lowRam=${activityManager.isLowRamDevice} " +
+                "memoryClassMb=${activityManager.memoryClass} maxMs=${bufferPolicy?.maximumMs ?: -1}",
+        )
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(playbackDataSource))
             .setRenderersFactory(SubtitleDelayRenderersFactory(this))

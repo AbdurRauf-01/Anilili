@@ -17,6 +17,9 @@ export interface ReportMetadata extends ArchiveDetails {
   buildSha: string;
   platform: string;
   privacy: "client-redacted";
+  description?: string;
+  screenshotBytes?: number;
+  screenshotContentType?: "image/jpeg" | "image/png" | "image/webp";
 }
 
 export interface DailyUsage {

@@ -474,14 +474,6 @@ private fun MiruroRoot(
     val hanimeResolverRequired by HanimeBridge.resolverRequired.collectAsState()
     val hideAdult by SettingsStore.hideAdultContent.collectAsState()
 
-    LaunchedEffect(hideAdult) {
-        if (!hideAdult) {
-            // Credentials and the catalogue still warm proactively when adult content is enabled,
-            // but the Hanime resolver exists only for the duration of that real request.
-            com.miruronative.data.AppGraph.repository.warmHanimeCatalogue()
-        }
-    }
-
     LaunchedEffect(deviceProfile.isTv, currentRoute) {
         // A watch deep link can be the process's first screen. Do not let a launch-only library
         // refresh wake up halfway through that episode; returning to a top-level tab starts this

@@ -88,6 +88,8 @@ import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.settings.MenuLanguage
 import com.miruronative.data.update.UpdateManager
 import com.miruronative.diagnostics.DiagnosticTrigger
+import com.miruronative.diagnostics.DiagnosticSendResult
+import com.miruronative.diagnostics.DiagnosticSubmissionDialog
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.diagnostics.DiagnosticsUploadManager
 import com.miruronative.ui.UiState
@@ -151,6 +153,8 @@ fun SettingsScreen(
     var loginService by remember { mutableStateOf<AccountService?>(null) }
     var diagnosticsMessage by remember { mutableStateOf<String?>(null) }
     var diagnosticsBusy by remember { mutableStateOf(false) }
+    var diagnosticsDialogVisible by remember { mutableStateOf(false) }
+    var diagnosticsError by remember { mutableStateOf<String?>(null) }
     var captionAppearanceVisible by remember { mutableStateOf(false) }
     var cacheUsage by remember { mutableStateOf<Long?>(null) }
     var cacheClearing by remember { mutableStateOf(false) }
@@ -173,6 +177,43 @@ fun SettingsScreen(
             onDismiss = { captionAppearanceVisible = false },
             footnote = "Applies to the built-in player. Servers that play in a web view render " +
                 "their own subtitles and may ignore some of these.",
+        )
+    }
+    if (diagnosticsDialogVisible) {
+        DiagnosticSubmissionDialog(
+            title = "Send diagnostics",
+            introduction = "Describe the problem so the report has useful context. This uploads the " +
+                "app timeline, device, performance, playback and network diagnostics. Passwords, " +
+                "cookies, tokens and sensitive links are removed.",
+            descriptionRequired = true,
+            sending = diagnosticsBusy,
+            errorMessage = diagnosticsError,
+            onDismiss = {
+                diagnosticsDialogVisible = false
+                diagnosticsError = null
+            },
+            onSend = { submission ->
+                diagnosticsBusy = true
+                diagnosticsError = null
+                diagnosticsMessage = "Preparing the full diagnostic report…"
+                scope.launch {
+                    try {
+                        val result = DiagnosticsUploadManager.send(
+                            context,
+                            DiagnosticTrigger.MANUAL,
+                            submission,
+                        )
+                        if (result is DiagnosticSendResult.Failed) {
+                            diagnosticsError = result.reason
+                        } else {
+                            diagnosticsMessage = result.userMessage()
+                            diagnosticsDialogVisible = false
+                        }
+                    } finally {
+                        diagnosticsBusy = false
+                    }
+                }
+            },
         )
     }
 
@@ -666,13 +707,8 @@ fun SettingsScreen(
                     icon = { Icon(Icons.Default.Upload, contentDescription = null) },
                     enabled = !diagnosticsBusy && BuildConfig.DIAGNOSTICS_UPLOAD_URL.isNotBlank(),
                     onClick = {
-                        diagnosticsBusy = true
-                        diagnosticsMessage = "Preparing and sending the full diagnostic report…"
-                        scope.launch {
-                            val result = DiagnosticsUploadManager.send(context, DiagnosticTrigger.MANUAL)
-                            diagnosticsMessage = result.userMessage()
-                            diagnosticsBusy = false
-                        }
+                        diagnosticsError = null
+                        diagnosticsDialogVisible = true
                     },
                 )
             }

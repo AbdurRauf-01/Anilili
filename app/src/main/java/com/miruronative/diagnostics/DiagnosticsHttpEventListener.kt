@@ -36,6 +36,15 @@ class DiagnosticsHttpEventListener private constructor(private val callId: Long)
         val request = call.request()
         host = request.url.host
         method = request.method
+        DiagnosticsLog.event(
+            category = "network",
+            name = "http.call.started",
+            attributes = mapOf(
+                "callId" to callId,
+                "method" to method,
+                "host" to host,
+            ),
+        )
     }
 
     override fun dnsStart(call: Call, domainName: String) {

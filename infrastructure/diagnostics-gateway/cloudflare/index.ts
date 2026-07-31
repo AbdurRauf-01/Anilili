@@ -13,8 +13,10 @@ import {
   ADMIN_REPORT_LIMIT,
   MAX_BYTES_PER_DAY,
   MAX_COMPRESSED_BYTES,
+  MAX_DESCRIPTION_CHARS,
   MAX_MULTIPART_BYTES,
   MAX_REPORTS_PER_DAY,
+  MAX_SCREENSHOT_BYTES,
   REPORT_ID_PATTERN,
   RETENTION_DAYS,
   SAFE_FIELD_PATTERN,
@@ -24,7 +26,7 @@ import { HfReportStore, StorageError } from "./hf-store";
 import { boundedJson, HttpError, jsonResponse, withSecurityHeaders } from "./http";
 import type { DailyUsage, DiagnosticTrigger, ReportMetadata } from "./types";
 
-const STARTED_AT = Date.now();
+let startedAt: number | undefined;
 
 function utcDay(date = new Date()): string {
   return date.toISOString().slice(0, 10);
@@ -34,6 +36,51 @@ function metadataField(form: FormData, name: string): string {
   const value = form.get(name);
   if (typeof value !== "string" || !SAFE_FIELD_PATTERN.test(value)) {
     throw new HttpError(400, "Invalid report metadata");
+  }
+  return value;
+}
+
+function redactDescription(value: string): string {
+  return value
+    .replaceAll("\0", "")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer <redacted>")
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "<redacted>")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "<redacted-email>")
+    .replace(
+      /\b(password|passwd|cookie|set-cookie|authorization|access[_-]?token|refresh[_-]?token|secret)\s*([=:])\s*([^\s,;}]+)/gi,
+      "$1$2<redacted>",
+    )
+    .trim()
+    .slice(0, MAX_DESCRIPTION_CHARS);
+}
+
+function descriptionField(form: FormData): string | undefined {
+  const value = form.get("description");
+  if (value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > MAX_DESCRIPTION_CHARS) {
+    throw new HttpError(400, "Invalid diagnostic description");
+  }
+  return redactDescription(value) || undefined;
+}
+
+async function screenshotField(
+  form: FormData,
+): Promise<File | null> {
+  const value = form.get("screenshot");
+  if (value === null) return null;
+  if (!(value instanceof File) || value.size <= 0 || value.size > MAX_SCREENSHOT_BYTES) {
+    throw new HttpError(400, "Invalid diagnostic screenshot");
+  }
+  const header = new Uint8Array(await value.slice(0, 12).arrayBuffer());
+  const isJpeg = header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  const isPng = header.length >= 8 &&
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, index) => header[index] === byte);
+  const isWebp = header.length >= 12 &&
+    new TextDecoder().decode(header.slice(0, 4)) === "RIFF" &&
+    new TextDecoder().decode(header.slice(8, 12)) === "WEBP";
+  const expectedType = isJpeg ? "image/jpeg" : isPng ? "image/png" : isWebp ? "image/webp" : null;
+  if (!expectedType || value.type !== expectedType) {
+    throw new HttpError(400, "Diagnostic screenshot must be a JPEG, PNG or WebP image");
   }
   return value;
 }
@@ -96,10 +143,12 @@ function validateEnvironment(env: Env): void {
   }
 }
 
-function runtimeHeaders(started = STARTED_AT): HeadersInit {
+function runtimeHeaders(now = Date.now()): HeadersInit {
+  startedAt ??= now;
+  const ageMs = Math.max(0, now - startedAt);
   return {
-    "X-Anilili-Cold-Start": String(Date.now() - started < 120_000),
-    "X-Anilili-Instance-Age": String(Math.floor((Date.now() - started) / 1_000)),
+    "X-Anilili-Cold-Start": String(ageMs < 120_000),
+    "X-Anilili-Instance-Age": String(Math.floor(ageMs / 1_000)),
   };
 }
 
@@ -129,6 +178,8 @@ async function uploadReport(request: Request, env: Env): Promise<Response> {
   const versionCode = metadataField(form, "version_code");
   const buildSha = metadataField(form, "build_sha");
   const platform = metadataField(form, "platform");
+  const description = descriptionField(form);
+  const screenshot = await screenshotField(form);
   const reportValue = form.get("report");
   if (!(reportValue instanceof File) || reportValue.size <= 0) {
     throw new HttpError(400, "Diagnostic report is missing");
@@ -151,7 +202,8 @@ async function uploadReport(request: Request, env: Env): Promise<Response> {
 
   await reserveUpload(request, env);
   const usage = await dailyUsage(env);
-  if (usage.reports >= MAX_REPORTS_PER_DAY || usage.bytes + reportValue.size > MAX_BYTES_PER_DAY) {
+  const receivedBytes = reportValue.size + (screenshot?.size ?? 0);
+  if (usage.reports >= MAX_REPORTS_PER_DAY || usage.bytes + receivedBytes > MAX_BYTES_PER_DAY) {
     throw new HttpError(429, "Daily diagnostic capacity reached; the app will retry later");
   }
 
@@ -167,16 +219,21 @@ async function uploadReport(request: Request, env: Env): Promise<Response> {
     buildSha,
     platform,
     privacy: "client-redacted",
+    ...(description ? { description } : {}),
+    ...(screenshot ? {
+      screenshotBytes: screenshot.size,
+      screenshotContentType: screenshot.type as "image/jpeg" | "image/png" | "image/webp",
+    } : {}),
     ...archive,
   };
   const storageStarted = performance.now();
-  await store.putReport(reportId, reportValue, metadata);
+  await store.putReport(reportId, reportValue, screenshot, metadata);
   try {
     await Promise.all([
       indexReport(env, metadata),
       updateDailyUsage(env, {
         reports: usage.reports + 1,
-        bytes: usage.bytes + reportValue.size,
+        bytes: usage.bytes + receivedBytes,
       }),
     ]);
   } catch (error) {
@@ -184,7 +241,13 @@ async function uploadReport(request: Request, env: Env): Promise<Response> {
     throw error;
   }
   const storageMs = performance.now() - storageStarted;
-  logEvent("report.accepted", { reportId, trigger, bytes: reportValue.size });
+  logEvent("report.accepted", {
+    reportId,
+    trigger,
+    bytes: reportValue.size,
+    screenshotBytes: screenshot?.size ?? 0,
+    hasDescription: Boolean(description),
+  });
   return jsonResponse(
     { status: "accepted", reportId, receivedBytes: reportValue.size },
     200,
@@ -230,6 +293,18 @@ async function downloadReport(request: Request, env: Env, reportId: string): Pro
   const headers = new Headers(stored.headers);
   headers.set("Content-Type", "application/zip");
   headers.set("Content-Disposition", `attachment; filename="${reportId}.zip"`);
+  headers.set("Cache-Control", "private, no-store");
+  return withSecurityHeaders(new Response(stored.body, { status: 200, headers }));
+}
+
+async function downloadScreenshot(request: Request, env: Env, reportId: string): Promise<Response> {
+  await requireAdmin(request, env);
+  if (!REPORT_ID_PATTERN.test(reportId)) throw new HttpError(400, "Invalid report reference");
+  const stored = await new HfReportStore(env).getScreenshot(reportId);
+  if (!stored) throw new HttpError(404, "Screenshot not found");
+  const headers = new Headers(stored.headers);
+  headers.set("Content-Type", headers.get("Content-Type") ?? "application/octet-stream");
+  headers.set("Content-Disposition", `inline; filename="${reportId}-screenshot"`);
   headers.set("Cache-Control", "private, no-store");
   return withSecurityHeaders(new Response(stored.body, { status: 200, headers }));
 }
@@ -293,9 +368,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (key === "GET /api/admin/reports") return adminReports(request, env);
 
-  const reportMatch = url.pathname.match(/^\/api\/admin\/reports\/(ANL-[0-9]{8}-[A-Z0-9]{10})(?:\/(download))?$/);
+  const reportMatch = url.pathname.match(
+    /^\/api\/admin\/reports\/(ANL-[0-9]{8}-[A-Z0-9]{10})(?:\/(download|screenshot))?$/,
+  );
   if (reportMatch && request.method === "GET" && reportMatch[2] === "download") {
     return downloadReport(request, env, reportMatch[1]);
+  }
+  if (reportMatch && request.method === "GET" && reportMatch[2] === "screenshot") {
+    return downloadScreenshot(request, env, reportMatch[1]);
   }
   if (reportMatch && request.method === "DELETE" && !reportMatch[2]) {
     return deleteReport(request, env, reportMatch[1]);

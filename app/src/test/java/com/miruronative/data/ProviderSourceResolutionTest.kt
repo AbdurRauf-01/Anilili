@@ -16,6 +16,26 @@ import org.junit.Test
 class ProviderSourceResolutionTest {
 
     @Test
+    fun `episode provider cooldown prevents immediate retry without affecting other episodes`() {
+        var now = 1_000L
+        val cooldowns = SourceFailureCooldowns { now }
+
+        val duration = cooldowns.record(
+            provider = "kaa",
+            anilistId = 123,
+            episode = 2.0,
+            kind = SourceFailureKind.FAILURE,
+            error = IllegalStateException("KickAssAnime episode 2 has no native HLS server"),
+        )
+
+        assertEquals(10 * 60_000L, duration)
+        assertEquals(setOf("kaa"), cooldowns.coolingProviders(123, 2.0, listOf("kaa", "animegg")))
+        assertTrue(cooldowns.coolingProviders(123, 3.0, listOf("kaa")).isEmpty())
+        now += duration
+        assertTrue(cooldowns.coolingProviders(123, 2.0, listOf("kaa")).isEmpty())
+    }
+
+    @Test
     fun `stalled preferred provider times out and falls through to next source`() = runBlocking {
         val attempts = mutableListOf<String>()
         val timedOut = mutableListOf<String>()

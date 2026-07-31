@@ -54,6 +54,42 @@ class DiagnosticUploadClientTest {
     }
 
     @Test
+    fun uploadIncludesDescriptionAndOptionalScreenshot() = runBlocking {
+        val screenshot = File.createTempFile("diagnostic-screenshot", ".png").apply {
+            writeBytes(
+                byteArrayOf(
+                    0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
+                ),
+            )
+        }
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setHeader("Content-Type", "application/json")
+                    .setBody("""{"status":"accepted","reportId":"ANL-20260730-ABC123DE45","receivedBytes":7}"""),
+            )
+            val client = DiagnosticUploadClient(server.url("/").toString(), OkHttpClient())
+
+            client.upload(
+                report,
+                "ANL-20260730-ABC123DE45",
+                DiagnosticTrigger.MANUAL,
+                "Video freezes after changing quality.",
+                DiagnosticScreenshot(screenshot, "image/png"),
+            )
+
+            val multipart = server.takeRequest().body.readUtf8()
+            assertTrue(multipart.contains("name=\"description\""))
+            assertTrue(multipart.contains("Video freezes after changing quality."))
+            assertTrue(multipart.contains("name=\"screenshot\""))
+            assertTrue(multipart.contains("filename=\"ANL-20260730-ABC123DE45-screenshot.png\""))
+            assertTrue(multipart.contains("Content-Type: image/png"))
+        } finally {
+            screenshot.delete()
+        }
+    }
+
+    @Test
     fun serverFailureIsMarkedRetryable() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(503))
         val client = DiagnosticUploadClient(server.url("/").toString(), OkHttpClient())

@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import cookieParser from "cookie-parser";
@@ -17,13 +17,15 @@ import { ArchiveValidationError, validateArchive } from "./archive.js";
 import {
   MAX_BYTES_PER_DAY,
   MAX_COMPRESSED_BYTES,
+  MAX_DESCRIPTION_CHARS,
   MAX_REPORTS_PER_DAY,
+  MAX_SCREENSHOT_BYTES,
   MAX_STORED_BYTES,
   RETENTION_DAYS,
   type RuntimeConfig,
 } from "./config.js";
 import { AdminLoginLimiter, UploadRateLimiter, UploadRateLimitError } from "./rate-limit.js";
-import type { DiagnosticTrigger, ReportMetadata, ReportStore } from "./types.js";
+import type { DiagnosticTrigger, ReportMetadata, ReportStore, ScreenshotUpload } from "./types.js";
 
 const STARTED_AT = Date.now();
 const REPORT_ID_PATTERN = /^ANL-[0-9]{8}-[A-Z0-9]{10}$/;
@@ -51,6 +53,44 @@ function metadataField(body: Record<string, unknown>, name: string): string {
   return value;
 }
 
+function descriptionField(body: Record<string, unknown>): string | undefined {
+  const value = body.description;
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || value.length > MAX_DESCRIPTION_CHARS) {
+    throw new ClientInputError("Invalid diagnostic description");
+  }
+  const redacted = value
+    .replaceAll("\0", "")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer <redacted>")
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "<redacted>")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "<redacted-email>")
+    .replace(
+      /\b(password|passwd|cookie|set-cookie|authorization|access[_-]?token|refresh[_-]?token|secret)\s*([=:])\s*([^\s,;}]+)/gi,
+      "$1$2<redacted>",
+    )
+    .trim();
+  return redacted || undefined;
+}
+
+async function validateScreenshot(file?: Express.Multer.File): Promise<ScreenshotUpload | null> {
+  if (!file) return null;
+  if (file.size <= 0 || file.size > MAX_SCREENSHOT_BYTES) {
+    throw new ClientInputError("Invalid diagnostic screenshot");
+  }
+  const header = (await readFile(file.path)).subarray(0, 12);
+  const isJpeg = header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  const isPng = header.length >= 8 &&
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, index) => header[index] === byte);
+  const isWebp = header.length >= 12 &&
+    header.subarray(0, 4).toString("ascii") === "RIFF" &&
+    header.subarray(8, 12).toString("ascii") === "WEBP";
+  const contentType = isJpeg ? "image/jpeg" : isPng ? "image/png" : isWebp ? "image/webp" : null;
+  if (!contentType || file.mimetype !== contentType) {
+    throw new ClientInputError("Diagnostic screenshot must be a JPEG, PNG or WebP image");
+  }
+  return { path: file.path, bytes: file.size, contentType };
+}
+
 class ClientInputError extends Error {}
 class DailyCapacityError extends Error {}
 
@@ -70,10 +110,10 @@ export function createApp({ store, config }: AppDependencies) {
     dest: config.tempDirectory,
     limits: {
       fileSize: MAX_COMPRESSED_BYTES,
-      files: 1,
-      fields: 8,
-      parts: 9,
-      fieldSize: 1_024,
+      files: 2,
+      fields: 9,
+      parts: 11,
+      fieldSize: 4_096,
     },
   });
 
@@ -110,12 +150,19 @@ export function createApp({ store, config }: AppDependencies) {
     }
   });
 
-  app.post("/v1/reports", upload.single("report"), async (request, response, next) => {
+  app.post("/v1/reports", upload.fields([
+    { name: "report", maxCount: 1 },
+    { name: "screenshot", maxCount: 1 },
+  ]), async (request, response, next) => {
     const started = performance.now();
-    const tempPath = request.file?.path;
+    const files = request.files as Record<string, Express.Multer.File[]> | undefined;
+    const reportFile = files?.report?.[0];
+    const screenshotFile = files?.screenshot?.[0];
+    const tempPath = reportFile?.path;
+    const screenshotTempPath = screenshotFile?.path;
     try {
-      if (!request.file || !tempPath) throw new ClientInputError("Diagnostic report is missing");
-      if (!new Set(["application/zip", "application/octet-stream"]).has(request.file.mimetype)) {
+      if (!reportFile || !tempPath) throw new ClientInputError("Diagnostic report is missing");
+      if (!new Set(["application/zip", "application/octet-stream"]).has(reportFile.mimetype)) {
         throw new ClientInputError("Diagnostic report must be a ZIP archive");
       }
       const reportId = String(request.body.report_id ?? "");
@@ -126,10 +173,13 @@ export function createApp({ store, config }: AppDependencies) {
       const versionCode = metadataField(request.body, "version_code");
       const buildSha = metadataField(request.body, "build_sha");
       const platform = metadataField(request.body, "platform");
+      const description = descriptionField(request.body);
+      const screenshot = await validateScreenshot(screenshotFile);
 
       if (await store.hasReport(reportId)) {
         await removeTemporary(tempPath);
-        response.json({ status: "accepted", reportId, receivedBytes: request.file.size });
+        await removeTemporary(screenshotTempPath);
+        response.json({ status: "accepted", reportId, receivedBytes: reportFile.size });
         return;
       }
 
@@ -139,7 +189,7 @@ export function createApp({ store, config }: AppDependencies) {
       const usage = await store.dailyUsage(utcDay());
       if (
         usage.reports >= MAX_REPORTS_PER_DAY ||
-        usage.bytes + request.file.size > MAX_BYTES_PER_DAY
+        usage.bytes + reportFile.size + (screenshot?.bytes ?? 0) > MAX_BYTES_PER_DAY
       ) {
         throw new DailyCapacityError("Daily diagnostic capacity reached; the app will retry");
       }
@@ -147,30 +197,43 @@ export function createApp({ store, config }: AppDependencies) {
       const metadata: ReportMetadata = {
         reportId,
         receivedUtc: new Date().toISOString(),
-        receivedBytes: request.file.size,
+        receivedBytes: reportFile.size,
         trigger,
         appVersion,
         versionCode,
         buildSha,
         platform,
+        ...(description ? { description } : {}),
+        ...(screenshot ? {
+          screenshotBytes: screenshot.bytes,
+          screenshotContentType: screenshot.contentType,
+        } : {}),
         ...archiveDetails,
       };
       const storeStarted = performance.now();
-      await store.putReport(reportId, tempPath, metadata);
+      await store.putReport(reportId, tempPath, screenshot, metadata);
       await removeTemporary(tempPath);
+      await removeTemporary(screenshotTempPath);
       const retentionBefore = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
       await store.cleanup(retentionBefore, MAX_STORED_BYTES);
       const storeMs = performance.now() - storeStarted;
-      logEvent("report.accepted", { reportId, trigger, bytes: request.file.size });
+      logEvent("report.accepted", {
+        reportId,
+        trigger,
+        bytes: reportFile.size,
+        screenshotBytes: screenshot?.bytes ?? 0,
+        hasDescription: Boolean(description),
+      });
       response.set({
         "Cache-Control": "no-store",
         "Server-Timing": `validate;dur=${validationMs.toFixed(1)}, store;dur=${storeMs.toFixed(1)}`,
         "X-Anilili-Instance-Age": String(Math.floor((Date.now() - STARTED_AT) / 1000)),
         "X-Anilili-Cold-Start": String(Date.now() - STARTED_AT < 120_000),
       });
-      response.json({ status: "accepted", reportId, receivedBytes: request.file.size });
+      response.json({ status: "accepted", reportId, receivedBytes: reportFile.size });
     } catch (error) {
       await removeTemporary(tempPath);
+      await removeTemporary(screenshotTempPath);
       next(error);
     }
   });
@@ -225,6 +288,26 @@ export function createApp({ store, config }: AppDependencies) {
         "Cache-Control": "private, no-store",
       });
       response.send(report);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/admin/reports/:reportId/screenshot", requireAdmin(config), async (request, response, next) => {
+    try {
+      const reportId = String(request.params.reportId);
+      if (!reportIdIsValid(reportId)) throw new ClientInputError("Invalid report reference");
+      const screenshot = await store.getScreenshot(reportId);
+      if (!screenshot) {
+        response.status(404).json({ error: "Screenshot not found" });
+        return;
+      }
+      response.set({
+        "Content-Type": screenshot.contentType,
+        "Content-Disposition": `inline; filename="${reportId}-screenshot"`,
+        "Cache-Control": "private, no-store",
+      });
+      response.send(screenshot.bytes);
     } catch (error) {
       next(error);
     }

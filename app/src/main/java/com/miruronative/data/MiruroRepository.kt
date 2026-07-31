@@ -52,6 +52,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
 import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.builtins.serializer
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Keeps fallback attempts spread across independent backends. Providers from one backend often
@@ -105,6 +106,69 @@ internal data class ProviderCandidateResolution(
     val resolved: ProviderSourceResult?,
     val unavailableProviders: Set<String>,
 )
+
+internal enum class SourceFailureKind {
+    FAILURE,
+    TIMEOUT,
+    EMPTY,
+}
+
+/**
+ * Prevents repeated retries of the same failed provider for the same episode. The key is scoped to
+ * one title/episode, so a bad KAA mapping cannot suppress KAA for unrelated anime.
+ */
+internal class SourceFailureCooldowns(
+    private val nowMs: () -> Long = System::currentTimeMillis,
+) {
+    private val unavailableUntil = ConcurrentHashMap<String, Long>()
+
+    fun coolingProviders(
+        anilistId: Int,
+        episode: Double,
+        providers: Collection<String>,
+    ): Set<String> {
+        val now = nowMs()
+        return providers.filterTo(linkedSetOf()) { provider ->
+            val key = key(provider, anilistId, episode)
+            val until = unavailableUntil[key] ?: return@filterTo false
+            if (until > now) {
+                true
+            } else {
+                unavailableUntil.remove(key, until)
+                false
+            }
+        }
+    }
+
+    fun record(
+        provider: String,
+        anilistId: Int,
+        episode: Double,
+        kind: SourceFailureKind,
+        error: Exception? = null,
+    ): Long {
+        val message = error?.message.orEmpty()
+        val durationMs = when {
+            "429" in message -> 10 * 60_000L
+            Regex("""\bHTTP\s+(?:403|404)\b""", RegexOption.IGNORE_CASE).containsMatchIn(message) ->
+                5 * 60_000L
+            "no native HLS server" in message || "episode page is unavailable" in message ->
+                10 * 60_000L
+            kind == SourceFailureKind.TIMEOUT -> 2 * 60_000L
+            kind == SourceFailureKind.EMPTY -> 2 * 60_000L
+            else -> 60_000L
+        }
+        unavailableUntil[key(provider, anilistId, episode)] = nowMs() + durationMs
+        return durationMs
+    }
+
+    fun clear(provider: String, anilistId: Int, episode: Double) {
+        unavailableUntil.remove(key(provider, anilistId, episode))
+    }
+
+    private fun key(provider: String, anilistId: Int, episode: Double): String =
+        "${provider.lowercase()}:$anilistId:$episode"
+}
 
 /**
  * Runs source providers in preference order without allowing one dead host to stop fallback.
@@ -183,6 +247,7 @@ class MiruroRepository(
     // Bounds the related-seasons walk's AniList fan-out so it can't monopolise the shared,
     // rate-limited connection pool (5/host) and stall playback-critical metadata/catalog lookups.
     private val seriesFetchGate = Semaphore(SERIES_FETCH_CONCURRENCY)
+    private val sourceFailureCooldowns = SourceFailureCooldowns()
 
     // ---- discovery (AniList) ----
     suspend fun homeCollections(force: Boolean = false): HomeCollections {
@@ -798,9 +863,20 @@ class MiruroRepository(
                 ?: return@mapNotNull null
             ProviderSourceCandidate(name, episode.pipeId)
         }
+        val coolingProviders = sourceFailureCooldowns.coolingProviders(
+            anilistId,
+            number,
+            candidates.map(ProviderSourceCandidate::provider),
+        )
+        if (coolingProviders.isNotEmpty()) {
+            DiagnosticsLog.event(
+                "Source resolve cooldown id=$anilistId episode=$number " +
+                    "providers=${coolingProviders.sorted().joinToString(",")}",
+            )
+        }
         val resolution = resolveProviderCandidates(
             candidates = candidates,
-            excludedProviders = excludedProviders,
+            excludedProviders = excludedProviders + coolingProviders,
             maxAttempts = maxAttempts,
             attemptTimeoutMs = PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS,
             attemptTimeoutMsFor = ::attemptTimeoutFor,
@@ -812,21 +888,42 @@ class MiruroRepository(
                 )
             },
             onFailure = { provider, error ->
+                val cooldownMs = sourceFailureCooldowns.record(
+                    provider,
+                    anilistId,
+                    number,
+                    SourceFailureKind.FAILURE,
+                    error,
+                )
                 DiagnosticsLog.throwable(
-                    "Source resolve failed provider=$provider id=$anilistId episode=$number",
+                    "Source resolve failed provider=$provider id=$anilistId episode=$number " +
+                        "cooldownMs=$cooldownMs",
                     error,
                 )
             },
             onTimeout = { provider ->
                 val timeoutMs = attemptTimeoutFor(provider)
+                val cooldownMs = sourceFailureCooldowns.record(
+                    provider,
+                    anilistId,
+                    number,
+                    SourceFailureKind.TIMEOUT,
+                )
                 DiagnosticsLog.event(
                     "Source resolve timeout provider=$provider id=$anilistId episode=$number " +
-                        "afterMs=$timeoutMs",
+                        "afterMs=$timeoutMs cooldownMs=$cooldownMs",
                 )
             },
             onEmpty = { provider ->
+                val cooldownMs = sourceFailureCooldowns.record(
+                    provider,
+                    anilistId,
+                    number,
+                    SourceFailureKind.EMPTY,
+                )
                 DiagnosticsLog.event(
-                    "Source resolve empty provider=$provider id=$anilistId episode=$number",
+                    "Source resolve empty provider=$provider id=$anilistId episode=$number " +
+                        "cooldownMs=$cooldownMs",
                 )
             },
         ) { candidate ->
@@ -838,9 +935,12 @@ class MiruroRepository(
                 allowInteractiveChallenges = interactiveAllAnime && candidate.provider == "allanime",
             )
         }
+        resolution.resolved?.provider?.let { provider ->
+            sourceFailureCooldowns.clear(provider, anilistId, number)
+        }
         return SourceResolution(
             resolved = resolution.resolved?.let { ResolvedSources(it.sources, it.provider) },
-            unavailableProviders = resolution.unavailableProviders,
+            unavailableProviders = resolution.unavailableProviders + coolingProviders,
         )
     }
 

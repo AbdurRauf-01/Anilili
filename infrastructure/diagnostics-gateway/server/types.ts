@@ -15,6 +15,20 @@ export interface ReportMetadata extends ArchiveDetails {
   versionCode: string;
   buildSha: string;
   platform: string;
+  description?: string;
+  screenshotBytes?: number;
+  screenshotContentType?: "image/jpeg" | "image/png" | "image/webp";
+}
+
+export interface ScreenshotUpload {
+  path: string;
+  bytes: number;
+  contentType: "image/jpeg" | "image/png" | "image/webp";
+}
+
+export interface StoredScreenshot {
+  bytes: Buffer;
+  contentType: string;
 }
 
 export interface DailyUsage {
@@ -30,9 +44,15 @@ export interface CleanupResult {
 export interface ReportStore {
   healthCheck(): Promise<void>;
   hasReport(reportId: string): Promise<boolean>;
-  putReport(reportId: string, zipPath: string, metadata: ReportMetadata): Promise<void>;
+  putReport(
+    reportId: string,
+    zipPath: string,
+    screenshot: ScreenshotUpload | null,
+    metadata: ReportMetadata,
+  ): Promise<void>;
   listReports(limit: number): Promise<ReportMetadata[]>;
   getReport(reportId: string): Promise<Buffer | null>;
+  getScreenshot(reportId: string): Promise<StoredScreenshot | null>;
   deleteReport(reportId: string): Promise<boolean>;
   dailyUsage(day: string): Promise<DailyUsage>;
   cleanup(retentionBefore: Date, maxStoredBytes: number): Promise<CleanupResult>;

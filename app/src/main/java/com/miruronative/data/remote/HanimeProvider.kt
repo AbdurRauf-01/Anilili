@@ -5,6 +5,11 @@ import com.miruronative.data.model.Media
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.model.StreamItem
 import com.miruronative.diagnostics.DiagnosticsLog
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -29,16 +34,25 @@ internal class HanimeProvider(
     private val cache: AppCache,
 ) {
     @Volatile private var bundled: List<HanimeVideo>? = null
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lazyRefreshStarted = AtomicBoolean(false)
 
     /**
      * Never blocks on the network. A refreshed copy is used when one has been downloaded, and the
      * bundled snapshot answers until then — so search works on a cold install, offline, and before
      * the WebView has produced credentials.
      */
-    suspend fun catalogue(): List<HanimeVideo> =
-        cache.getIfFresh(CACHE_KEY, ListSerializer(HanimeVideo.serializer()))
+    suspend fun catalogue(): List<HanimeVideo> {
+        val catalogue = cache.getIfFresh(CACHE_KEY, ListSerializer(HanimeVideo.serializer()))
             ?.takeIf { it.isNotEmpty() }
             ?: bundledCatalogue()
+        if (lazyRefreshStarted.compareAndSet(false, true)) {
+            // Adult browsing or playback is the first real demand. Return the bundled catalogue
+            // immediately and refresh without making Home/startup pay for a resolver WebView.
+            refreshScope.launch { refresh() }
+        }
+        return catalogue
+    }
 
     /**
      * Pull a fresh copy in the background. hanime keeps releasing, so the bundled snapshot is a

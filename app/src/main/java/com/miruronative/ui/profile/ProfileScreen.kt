@@ -39,10 +39,12 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -99,9 +101,12 @@ import com.miruronative.playback.EpisodeExport
 import com.miruronative.playback.EpisodeExportState
 import com.miruronative.playback.EpisodeExportStatus
 import com.miruronative.playback.OfflineEpisode
+import com.miruronative.playback.OfflineSeries
 import com.miruronative.playback.episodeDownloadBadges
 import com.miruronative.ui.components.DownloadCoverBadge
+import com.miruronative.playback.offlineEpisodeBlocks
 import com.miruronative.playback.offlineEpisodes
+import com.miruronative.playback.offlineSeries
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -172,6 +177,8 @@ fun ProfileScreen(
     val episodeDownloads = remember(downloadIndex, exportedEpisodes) {
         offlineEpisodes(downloadIndex, exportedEpisodes)
     }
+    // The flat list is unmanageable for long-runners; the section below groups by anime instead.
+    val downloadSeries = remember(episodeDownloads) { offlineSeries(episodeDownloads) }
     val isRefreshing by vm.isRefreshing.collectAsState()
     var loginService by remember { mutableStateOf<AccountService?>(null) }
     var selectedViewName by rememberSaveable { mutableStateOf(LibraryView.WATCHLIST.name) }
@@ -232,7 +239,43 @@ fun ProfileScreen(
     var isLibraryExpanded by rememberSaveable { mutableStateOf(false) }
     var isHistoryExpanded by rememberSaveable { mutableStateOf(false) }
     var isDownloadsExpanded by rememberSaveable { mutableStateOf(false) }
+    var selectedDownloadSeriesId by rememberSaveable { mutableStateOf<Int?>(null) }
+    var showDownloadsRemoveAll by remember { mutableStateOf(false) }
+    val selectedDownloadSeries = downloadSeries.firstOrNull { it.anilistId == selectedDownloadSeriesId }
+    var selectedDownloadCategory by remember(selectedDownloadSeriesId) { mutableStateOf<String?>(null) }
+    var selectedDownloadBlock by remember(selectedDownloadSeriesId, selectedDownloadCategory) { mutableStateOf(0) }
+    // The series the viewer is browsing can vanish under them (remove-all, or the last episode
+    // deleted from the watch page); drop back to the series list instead of showing a ghost.
+    LaunchedEffect(selectedDownloadSeriesId, selectedDownloadSeries) {
+        if (selectedDownloadSeriesId != null && selectedDownloadSeries == null) {
+            selectedDownloadSeriesId = null
+        }
+    }
     val profileListState = rememberLazyListState()
+
+    if (showDownloadsRemoveAll && selectedDownloadSeries != null) {
+        val series = selectedDownloadSeries
+        AlertDialog(
+            onDismissRequest = { showDownloadsRemoveAll = false },
+            title = { Text("Remove all downloads?") },
+            text = {
+                Text(
+                    "This removes every saved episode of ${series.title} from this device, " +
+                        "including any MP4 copies exported to the Downloads folder.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    series.episodes.forEach { removeOfflineEpisode(context, it) }
+                    showDownloadsRemoveAll = false
+                    selectedDownloadSeriesId = null
+                }) { Text("Remove all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDownloadsRemoveAll = false }) { Text("Cancel") }
+            },
+        )
+    }
 
     Scaffold(
         modifier = modifier,
@@ -450,17 +493,121 @@ fun ProfileScreen(
                     item {
                         ProfileSectionTitle(
                             title = "Downloads",
-                            subtitle = "Episodes saved on this device for offline viewing",
-                            isExpanded = isDownloadsExpanded,
-                            onToggleExpand = { isDownloadsExpanded = !isDownloadsExpanded },
+                            subtitle = "Episodes saved on this device, grouped by anime",
+                            isExpanded = isDownloadsExpanded.takeIf { selectedDownloadSeries == null },
+                            onToggleExpand = if (selectedDownloadSeries == null) {
+                                { isDownloadsExpanded = !isDownloadsExpanded }
+                            } else {
+                                null
+                            },
                         )
                     }
-                    if (episodeDownloads.isEmpty()) {
+                    if (downloadSeries.isEmpty()) {
                         item { EmptyPanel("Download a native-stream episode from its watch page") }
-                    } else if (isDownloadsExpanded) {
+                    } else if (selectedDownloadSeries != null) {
+                        val series = selectedDownloadSeries
+                        val categories = series.episodes.map { it.metadata.category }.distinct()
+                        val categoryEpisodes = series.episodes.filter {
+                            selectedDownloadCategory == null || it.metadata.category == selectedDownloadCategory
+                        }
+                        // Long-runners get the same range chunking as the streaming episode browser.
+                        val blocks = offlineEpisodeBlocks(categoryEpisodes)
+                        val blockIndex = selectedDownloadBlock.coerceAtMost(blocks.lastIndex.coerceAtLeast(0))
+                        val visibleEpisodes = blocks.getOrNull(blockIndex)?.episodes.orEmpty()
+                        item(key = "dl_series_header") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = device.pagePadding, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                IconButton(
+                                    onClick = { selectedDownloadSeriesId = null },
+                                    modifier = Modifier.focusHighlight(RoundedCornerShape(8.dp)),
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back to all downloads",
+                                    )
+                                }
+                                Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                                    Text(
+                                        series.title,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Black,
+                                    )
+                                    Text(
+                                        listOfNotNull(
+                                            "${series.playableCount} of ${series.episodes.size} offline",
+                                            formatDownloadBytes(series.totalBytes).takeIf { series.totalBytes > 0 },
+                                            "${series.activeCount} downloading".takeIf { series.activeCount > 0 },
+                                        ).joinToString(" \u00b7 "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { showDownloadsRemoveAll = true },
+                                    modifier = Modifier.focusHighlight(RoundedCornerShape(8.dp)),
+                                ) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Remove all")
+                                }
+                            }
+                        }
+                        if (categories.size > 1) {
+                            item(key = "dl_series_categories") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = device.pagePadding),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    FilterChip(
+                                        selected = selectedDownloadCategory == null,
+                                        onClick = { selectedDownloadCategory = null },
+                                        label = { Text("All") },
+                                        modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                                    )
+                                    categories.forEach { category ->
+                                        FilterChip(
+                                            selected = selectedDownloadCategory == category,
+                                            onClick = { selectedDownloadCategory = category },
+                                            label = { Text(category.uppercase()) },
+                                            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (blocks.size > 1) {
+                            item(key = "dl_series_blocks") {
+                                LazyRow(
+                                    modifier = Modifier.focusGroup(),
+                                    contentPadding = PaddingValues(horizontal = device.pagePadding),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(blocks.size) { index ->
+                                        FilterChip(
+                                            selected = blockIndex == index,
+                                            onClick = { selectedDownloadBlock = index },
+                                            label = { Text(blocks[index].label) },
+                                            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         val downloadColumns = if (device.isTv) 3 else 2
-                        val downloadRows = episodeDownloads.chunked(downloadColumns)
-                        itemsIndexed(downloadRows, key = { rowIndex, _ -> "dl_row_$rowIndex" }) { _, row ->
+                        itemsIndexed(
+                            visibleEpisodes.chunked(downloadColumns),
+                            key = { rowIndex, _ -> "dl_series_row_$rowIndex" },
+                        ) { _, row ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -488,6 +635,28 @@ fun ProfileScreen(
                                 }
                             }
                         }
+                    } else if (isDownloadsExpanded) {
+                        val downloadColumns = if (device.isTv) 3 else 2
+                        val downloadRows = downloadSeries.chunked(downloadColumns)
+                        itemsIndexed(downloadRows, key = { rowIndex, _ -> "dl_row_$rowIndex" }) { _, row ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = device.pagePadding, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                for (series in row) {
+                                    SeriesDownloadCard(
+                                        series = series,
+                                        onClick = { selectedDownloadSeriesId = series.anilistId },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                repeat(downloadColumns - row.size) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
                     } else {
                         item {
                             LazyRow(
@@ -495,19 +664,10 @@ fun ProfileScreen(
                                 contentPadding = PaddingValues(horizontal = device.pagePadding),
                                 horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 12.dp),
                             ) {
-                                items(episodeDownloads, key = OfflineEpisode::id) { episode ->
-                                    EpisodeDownloadCard(
-                                        episode = episode,
-                                        exportStatus = exportStatuses[episode.id],
-                                        onPlay = { onPlayDownload(episode.id) },
-                                        onPauseToggle = {
-                                            episode.download?.let { download ->
-                                                if (download.isPaused) EpisodeDownloads.resume(context, episode.id)
-                                                else EpisodeDownloads.pause(context, episode.id)
-                                            }
-                                        },
-                                        onRemove = { removeOfflineEpisode(context, episode) },
-                                        onExport = { EpisodeExport.request(context, episode.id) },
+                                items(downloadSeries, key = OfflineSeries::anilistId) { series ->
+                                    SeriesDownloadCard(
+                                        series = series,
+                                        onClick = { selectedDownloadSeriesId = series.anilistId },
                                     )
                                 }
                             }
@@ -1019,6 +1179,95 @@ private fun EpisodeDownloadCard(
                         Icon(Icons.Default.Delete, contentDescription = "Remove download")
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * One anime's offline episodes as a single card. The flat per-episode list this replaced was
+ * unmanageable for long-runners (180+ episodes of one show); the card opens the series view,
+ * which is where individual episodes are played, paused, exported, or removed.
+ */
+@Composable
+private fun SeriesDownloadCard(
+    series: OfflineSeries,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val device = LocalAppDeviceProfile.current
+    val shape = RoundedCornerShape(12.dp)
+    val cardModifier = (if (modifier != Modifier) {
+        modifier
+    } else {
+        Modifier.width(if (device.isTv) 320.dp else 270.dp)
+    })
+        .focusHighlight(shape)
+        .clickable(onClickLabel = "Open ${series.title} downloads", onClick = onClick)
+    Surface(
+        modifier = cardModifier,
+        shape = shape,
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+    ) {
+        Column {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            ) {
+                AsyncImage(
+                    model = series.artworkUrl,
+                    contentDescription = series.title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.4f to Color.Transparent,
+                                1f to Color.Black.copy(alpha = 0.82f),
+                            ),
+                        ),
+                )
+                Text(
+                    "${series.episodes.size} EP",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(10.dp),
+                )
+                if (series.activeCount > 0) {
+                    Icon(
+                        Icons.Default.Download,
+                        contentDescription = "Download in progress",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(10.dp),
+                    )
+                }
+            }
+            Column(
+                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Text(
+                    series.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    listOfNotNull(
+                        "${series.playableCount} of ${series.episodes.size} offline",
+                        formatDownloadBytes(series.totalBytes).takeIf { series.totalBytes > 0 },
+                    ).joinToString(" \u00b7 "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

@@ -52,10 +52,11 @@ private const val PREVIEW_BASE_SP = 15f
 fun CaptionAppearanceEditor(
     modifier: Modifier = Modifier,
     footnote: String? = null,
+    showPreview: Boolean = true,
 ) {
     val style by SettingsStore.captionStyle.collectAsState()
     Column(modifier.fillMaxWidth()) {
-        CaptionPreview(style)
+        if (showPreview) CaptionPreview(style)
         CaptionChoiceRow(
             label = "Background opacity",
             options = CaptionStyle.BACKGROUND_OPACITY_STEPS,
@@ -126,13 +127,19 @@ fun CaptionAppearanceDialog(
         onDismissRequest = onDismiss,
         title = { Text("Caption appearance") },
         text = {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 480.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                CaptionAppearanceEditor(footnote = footnote)
+            val style by SettingsStore.captionStyle.collectAsState()
+            Column(Modifier.fillMaxWidth()) {
+                // Pinned outside the scroll area so every option change is visible
+                // immediately instead of requiring a swipe back up to the preview.
+                CaptionPreview(style)
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 340.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    CaptionAppearanceEditor(footnote = footnote, showPreview = false)
+                }
             }
         },
         confirmButton = {

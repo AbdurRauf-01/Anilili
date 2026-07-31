@@ -168,6 +168,7 @@ fun WatchScreen(
     inPictureInPicture: Boolean = false,
     onPictureInPictureReadyChanged: (Boolean) -> Unit = {},
     onBack: () -> Unit,
+    onOpenAnime: () -> Unit,
     vm: WatchViewModel = viewModel(),
 ) {
     LaunchedEffect(animeId, provider, category, episode) {
@@ -351,6 +352,7 @@ fun WatchScreen(
                         )
                     },
                     onBack = pauseAndBack,
+                    onOpenAnime = onOpenAnime,
                     onPrev = vm::prev,
                     onNext = vm::next,
                     onChangeSource = vm::changeSource,
@@ -394,6 +396,7 @@ private fun WatchContent(
     saved: Boolean,
     onToggleSaved: () -> Unit,
     onBack: () -> Unit,
+    onOpenAnime: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onChangeSource: (String, String) -> Unit,
@@ -423,7 +426,10 @@ private fun WatchContent(
         data.current.displayNumber,
     )
     val episodeDownload = downloads.firstOrNull { it.id == downloadId }
+    // The chosen stream may be an embed (Bonk, Kiwi) that cannot be saved; fall back to
+    // any natively downloadable stream so the episode stays downloadable either way.
     val streamForDownload = data.chosenStream?.takeIf(EpisodeDownloads::canDownload)
+        ?: data.sources.streams.firstOrNull(EpisodeDownloads::canDownload)
     val canSaveToDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
         EpisodeDownloads.canSaveToDevice(streamForDownload)
     val downloadPreparing = downloadId in preparingIds
@@ -872,6 +878,7 @@ private fun WatchContent(
                 data = data,
                 saved = saved,
                 onToggleSaved = onToggleSaved,
+                onOpenAnime = onOpenAnime,
                 episodeDownload = episodeDownload,
                 downloadPreparing = downloadPreparing,
                 canDownload = streamForDownload != null,
@@ -921,6 +928,7 @@ private fun WatchContent(
                     data = data,
                     saved = saved,
                     onToggleSaved = onToggleSaved,
+                    onOpenAnime = onOpenAnime,
                     episodeDownload = episodeDownload,
                     downloadPreparing = downloadPreparing,
                     canDownload = streamForDownload != null,
@@ -1025,6 +1033,7 @@ private fun WatchEpisodeSummary(
     data: WatchData,
     saved: Boolean,
     onToggleSaved: () -> Unit,
+    onOpenAnime: () -> Unit,
     episodeDownload: EpisodeDownload?,
     downloadPreparing: Boolean,
     canDownload: Boolean,
@@ -1151,13 +1160,23 @@ private fun WatchEpisodeSummary(
             modifier = Modifier.fillMaxWidth().padding(top = if (description.isBlank()) 10.dp else 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Tapping the series identity leaves the episode for the anime's detail page;
+            // the action buttons beside it keep their own click targets.
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClickLabel = "Open ${data.seriesTitle}", onClick = onOpenAnime)
+                    .focusHighlight(RoundedCornerShape(8.dp)),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             AsyncImage(
                 model = data.artworkUrl,
                 contentDescription = null,
                 modifier = Modifier.size(44.dp).clip(CircleShape),
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
             )
-            Column(Modifier.weight(1f).padding(start = 10.dp)) {
+            Column(Modifier.padding(start = 10.dp)) {
                 Text(
                     text = data.seriesTitle,
                     style = MaterialTheme.typography.titleSmall,
@@ -1172,6 +1191,7 @@ private fun WatchEpisodeSummary(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
             }
             val hasNativeDownloadAction = canDownload || episodeDownload != null || downloadPreparing
             if (providerDownloadUrl != null) {
@@ -1587,6 +1607,7 @@ private fun MobileWatchDetails(
     data: WatchData,
     saved: Boolean,
     onToggleSaved: () -> Unit,
+    onOpenAnime: () -> Unit,
     episodeDownload: EpisodeDownload?,
     downloadPreparing: Boolean,
     canDownload: Boolean,
@@ -1637,6 +1658,7 @@ private fun MobileWatchDetails(
                     data = data,
                     saved = saved,
                     onToggleSaved = onToggleSaved,
+                    onOpenAnime = onOpenAnime,
                     episodeDownload = episodeDownload,
                     downloadPreparing = downloadPreparing,
                     canDownload = canDownload,

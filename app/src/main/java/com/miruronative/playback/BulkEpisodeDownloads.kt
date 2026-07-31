@@ -162,33 +162,94 @@ object BulkEpisodeDownloads {
         catalog: EpisodesResult,
         quality: DownloadQuality,
     ): Boolean {
-        val resolution = AppGraph.repository.resolveSources(
-            anilistId = anilistId,
-            number = episode.number,
-            preferred = preferredProvider,
-            category = category,
-            episodes = catalog,
-        )
-        val resolved = resolution.resolved ?: return false
-        val stream = resolved.sources.streams.firstOrNull(EpisodeDownloads::canDownload)
-            ?: return false
+        val excludedProviders = mutableSetOf<String>()
+        var attempts = 0
+        while (attempts < 3) {
+            attempts++
+            val download = resolveDownloadable(
+                anilistId = anilistId,
+                seriesTitle = seriesTitle,
+                artworkUrl = artworkUrl,
+                category = category,
+                preferredProvider = preferredProvider,
+                episode = episode,
+                catalog = catalog,
+                excludedProviders = excludedProviders,
+            ) ?: return false
 
-        val metadata = EpisodeDownloadMetadata(
-            anilistId = anilistId,
-            seriesTitle = seriesTitle,
-            episodeNumber = episode.displayNumber,
-            episodeTitle = episode.title,
-            artworkUrl = artworkUrl,
-            provider = resolved.provider,
-            category = category.api,
-            referer = stream.referer,
-            headers = stream.headers,
-            subtitles = resolved.sources.subtitles.map {
-                EpisodeDownloadSubtitle(url = it.url, label = it.label, language = it.language)
-            },
-        )
-        EpisodeDownloads.enqueue(context, metadata, stream, quality)
-        return true
+            if (awaitEnqueue(context, download, quality)) return true
+
+            // HLS prepares are asynchronous and provider URLs are routinely single-use, short-lived,
+            // or 403: if prepare fails, exclude this provider and try an alternative source.
+            excludedProviders.add(download.metadata.provider)
+        }
+        return false
+    }
+
+    private class ResolvedDownload(
+        val stream: com.miruronative.data.model.StreamItem,
+        val metadata: EpisodeDownloadMetadata,
+    )
+
+    private suspend fun resolveDownloadable(
+        anilistId: Int,
+        seriesTitle: String,
+        artworkUrl: String?,
+        category: Category,
+        preferredProvider: String,
+        episode: EpisodeItem,
+        catalog: EpisodesResult,
+        excludedProviders: Set<String> = emptySet(),
+    ): ResolvedDownload? {
+        val currentExcluded = excludedProviders.toMutableSet()
+        while (true) {
+            val resolution = AppGraph.repository.resolveSources(
+                anilistId = anilistId,
+                number = episode.number,
+                preferred = preferredProvider,
+                category = category,
+                episodes = catalog,
+                excludedProviders = currentExcluded,
+            )
+            val resolved = resolution.resolved ?: return null
+            val stream = resolved.sources.streams.firstOrNull(EpisodeDownloads::canDownload)
+            if (stream != null) {
+                val metadata = EpisodeDownloadMetadata(
+                    anilistId = anilistId,
+                    seriesTitle = seriesTitle,
+                    episodeNumber = episode.displayNumber,
+                    episodeTitle = episode.title,
+                    artworkUrl = artworkUrl,
+                    provider = resolved.provider,
+                    category = category.api,
+                    referer = stream.referer,
+                    headers = stream.headers,
+                    subtitles = resolved.sources.subtitles.map {
+                        EpisodeDownloadSubtitle(url = it.url, label = it.label, language = it.language)
+                    },
+                )
+                return ResolvedDownload(stream, metadata)
+            }
+            // Resolved provider returned only embeds / un-downloadable streams.
+            // Exclude it and loop to try the next provider in priority order.
+            currentExcluded.add(resolved.provider)
+        }
+    }
+
+    /**
+     * Suspends until the enqueue actually succeeds or fails. HLS downloads prepare their manifest
+     * asynchronously, so counting the episode the moment [EpisodeDownloads.enqueue] returns is how
+     * a batch of 403s used to report "queued=5 failed=0" and leave no trace in the library.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private suspend fun awaitEnqueue(
+        context: Context,
+        download: ResolvedDownload,
+        quality: DownloadQuality,
+    ): Boolean = kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+        EpisodeDownloads.enqueue(context, download.metadata, download.stream, quality) { result ->
+            if (continuation.isActive) continuation.resume(result.isSuccess) {}
+        }
     }
 
     private const val BETWEEN_EPISODES_MS = 1_200L

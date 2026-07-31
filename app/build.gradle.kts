@@ -18,8 +18,8 @@ val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
             isIgnoreExitValue = true
         }.standardOutput.asText.get().trim()
     }.getOrDefault("unknown").ifBlank { "unknown" }
-val appVersionCode = 54
-val appVersionName = "0.1.53"
+val appVersionCode = 55
+val appVersionName = "0.1.54"
 val diagnosticsUploadUrl = providers.gradleProperty("diagnosticsUploadUrl").orNull
     ?: providers.environmentVariable("DIAGNOSTICS_UPLOAD_URL").orNull
     ?: "https://anilili-diagnostics.anilili.workers.dev"

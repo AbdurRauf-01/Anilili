@@ -1109,6 +1109,7 @@ private fun AppNavHost(
                     inPictureInPicture = inPictureInPicture,
                     onPictureInPictureReadyChanged = onPictureInPictureReadyChanged,
                     onBack = { nav.popBackStack() },
+                    onOpenAnime = { nav.navigate(Routes.detail(watchId)) },
                 )
             }
         }

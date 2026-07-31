@@ -52,4 +52,40 @@ class PipeBridgeMirrorOrderTest {
             ),
         )
     }
+
+    @Test
+    fun `remembered healthy mirror receives the longer watchdog`() {
+        assertEquals(
+            12_000L,
+            pipeMirrorWatchdogTimeoutMs(
+                origin = ".bz",
+                lastWorkingOrigin = ".bz",
+                standardTimeoutMs = 7_000L,
+                rememberedTimeoutMs = 12_000L,
+            ),
+        )
+        assertEquals(
+            7_000L,
+            pipeMirrorWatchdogTimeoutMs(
+                origin = ".to",
+                lastWorkingOrigin = ".bz",
+                standardTimeoutMs = 7_000L,
+                rememberedTimeoutMs = 12_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `cold start budget includes remembered mirror extension`() {
+        assertEquals(
+            36_000L,
+            pipePageReadyTimeoutMs(
+                originCount = 4,
+                mirrorTimeoutMs = 7_000L,
+                pageSettleMs = 2_000L,
+                schedulerGraceMs = 1_000L,
+                rememberedMirrorExtraMs = 5_000L,
+            ),
+        )
+    }
 }

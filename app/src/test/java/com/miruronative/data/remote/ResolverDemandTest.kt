@@ -39,4 +39,21 @@ class ResolverDemandTest {
 
         assertFalse(demand.required.value)
     }
+
+    @Test
+    fun `warm session survives the catalog request closing until source handoff completes`() {
+        val demand = ResolverDemand("test-warm-handoff")
+        val warmSession = demand.acquire()
+        val catalogRequest = demand.acquire()
+
+        catalogRequest.close()
+        assertTrue(demand.required.value)
+
+        val sourceRequest = demand.acquire()
+        warmSession.close()
+        assertTrue(demand.required.value)
+
+        sourceRequest.close()
+        assertFalse(demand.required.value)
+    }
 }

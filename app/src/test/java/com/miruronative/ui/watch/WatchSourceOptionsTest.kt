@@ -61,6 +61,13 @@ class WatchSourceOptionsTest {
         assertEquals(listOf("reanime"), shown.map { it.provider })
     }
 
+    @Test
+    fun miruroRetryIsOnlyNeededWhenEveryPipeProviderIsMissing() {
+        assertTrue(hasMiruroSourceOptions(listOf(option("kiwi"), option("senshi"))))
+        assertTrue(hasMiruroSourceOptions(listOf(option("bonk"))))
+        assertFalse(hasMiruroSourceOptions(listOf(option("senshi"), option("anibd"))))
+    }
+
     private fun option(provider: String) = WatchSourceOption(
         provider = provider,
         category = com.miruronative.data.model.Category.SUB,

@@ -356,6 +356,7 @@ fun WatchScreen(
                     onChangeSource = vm::changeSource,
                     onChangeCategory = vm::changeCategory,
                     onRequestAllSources = vm::validateRemainingSources,
+                    onRetryMiruroSources = vm::retryMiruroServers,
                     onSelectEpisode = { index ->
                         if (device.isTv) fullscreen = true
                         vm.playIndex(index)
@@ -398,6 +399,7 @@ private fun WatchContent(
     onChangeSource: (String, String) -> Unit,
     onChangeCategory: (String) -> Unit,
     onRequestAllSources: () -> Unit,
+    onRetryMiruroSources: () -> Unit,
     onSelectEpisode: (Int) -> Unit,
     onWebFallback: () -> Unit,
     onToggleFullscreen: () -> Unit,
@@ -879,6 +881,7 @@ private fun WatchContent(
                 onChangeSource = onChangeSource,
                 onChangeCategory = onChangeCategory,
                 onRequestAllSources = onRequestAllSources,
+                onRetryMiruroSources = onRetryMiruroSources,
                 onSelectEpisode = onSelectEpisode,
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
@@ -939,6 +942,7 @@ private fun WatchContent(
                     onChangeSource = onChangeSource,
                     onChangeCategory = onChangeCategory,
                     onRequestAllSources = onRequestAllSources,
+                    onRetryMiruroSources = onRetryMiruroSources,
                     focusRequester = sourceFocus,
                     onToggleFullscreen = onToggleFullscreen,
                     downFocus = tvBrowserFocus.takeIf { tvBrowserVisible },
@@ -1592,6 +1596,7 @@ private fun MobileWatchDetails(
     onChangeSource: (String, String) -> Unit,
     onChangeCategory: (String) -> Unit,
     onRequestAllSources: () -> Unit,
+    onRetryMiruroSources: () -> Unit,
     onSelectEpisode: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1647,6 +1652,7 @@ private fun MobileWatchDetails(
                 onChangeSource = onChangeSource,
                 onChangeCategory = onChangeCategory,
                 onRequestAllSources = onRequestAllSources,
+                onRetryMiruroSources = onRetryMiruroSources,
                 focusRequester = focusRequester,
             )
             data.notice?.let { notice ->
@@ -1831,6 +1837,7 @@ private fun SourceSelectors(
     onChangeSource: (String, String) -> Unit,
     onChangeCategory: (String) -> Unit,
     onRequestAllSources: () -> Unit,
+    onRetryMiruroSources: () -> Unit,
     focusRequester: FocusRequester,
     onToggleFullscreen: (() -> Unit)? = null,
     // Where the D-pad should go when leaving this row downwards. The episode browser below is
@@ -1906,7 +1913,7 @@ private fun SourceSelectors(
                 onClick = onToggleFullscreen,
             )
         }
-        if (data.isLoadingMoreSources) {
+        if (data.isLoadingMoreSources || data.isRetryingMiruro) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1917,7 +1924,7 @@ private fun SourceSelectors(
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    text = "More servers…",
+                    text = if (data.isRetryingMiruro) "Reconnecting Miruro…" else "More servers…",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1948,6 +1955,7 @@ private fun SourceSelectors(
                         onChangeSource(server, nextCategory.api)
                     }
                 },
+                onRetryMiruroSources = onRetryMiruroSources,
                 onClose = { showServerDialog = false },
             )
         }
@@ -2001,7 +2009,7 @@ private fun SourceSelectors(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            if (data.isLoadingMoreSources) {
+                            if (data.isLoadingMoreSources || data.isRetryingMiruro) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(12.dp),
                                     strokeWidth = 1.5.dp,
@@ -2009,7 +2017,9 @@ private fun SourceSelectors(
                                 )
                             }
                             Text(
-                                text = if (data.isLoadingMoreSources) {
+                                text = if (data.isRetryingMiruro) {
+                                    "Reconnecting Miruro… ${servers.size} available"
+                                } else if (data.isLoadingMoreSources) {
                                     "Finding servers… ${servers.size} so far"
                                 } else if (data.preferredProvider == "auto") {
                                     "Applies to this episode only · ${servers.size} available"
@@ -2158,14 +2168,32 @@ private fun SourceSelectors(
                         }
                     }
 
-                    TextButton(
-                        onClick = {
-                            showServerDialog = false
-                            if (device.isTv) runCatching { focusRequester.requestFocus() }
-                        },
-                        modifier = Modifier.align(Alignment.End)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Close")
+                        if (!data.hasMiruroSources) {
+                            TextButton(
+                                onClick = onRetryMiruroSources,
+                                enabled = !data.isRetryingMiruro,
+                                modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                            ) {
+                                Text(
+                                    if (data.isRetryingMiruro) "Retrying Miruro…"
+                                    else "Retry Miruro servers",
+                                )
+                            }
+                        }
+                        TextButton(
+                            onClick = {
+                                showServerDialog = false
+                                if (device.isTv) runCatching { focusRequester.requestFocus() }
+                            },
+                            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                        ) {
+                            Text("Close")
+                        }
                     }
                 }
             }
@@ -2183,6 +2211,7 @@ private fun MobileServerPickerContent(
     language: String?,
     onLanguageChange: (String?) -> Unit,
     onSelect: (String) -> Unit,
+    onRetryMiruroSources: () -> Unit,
     onClose: () -> Unit,
 ) {
     val categoriesByServer = remember(data.sourceOptions) {
@@ -2207,7 +2236,7 @@ private fun MobileServerPickerContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (data.isLoadingMoreSources) {
+                if (data.isLoadingMoreSources || data.isRetryingMiruro) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
                         strokeWidth = 2.dp,
@@ -2215,7 +2244,9 @@ private fun MobileServerPickerContent(
                     )
                 }
                 Text(
-                    text = if (data.isLoadingMoreSources) {
+                    text = if (data.isRetryingMiruro) {
+                        "Reconnecting Miruro… ${servers.size} available"
+                    } else if (data.isLoadingMoreSources) {
                         "Finding servers… ${servers.size} so far"
                     } else if (data.preferredProvider == "auto") {
                         "Applies to this episode only · ${servers.size} available"
@@ -2347,8 +2378,25 @@ private fun MobileServerPickerContent(
             }
         }
 
-        TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
-            Text("Close")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!data.hasMiruroSources) {
+                TextButton(
+                    onClick = onRetryMiruroSources,
+                    enabled = !data.isRetryingMiruro,
+                ) {
+                    Text(
+                        if (data.isRetryingMiruro) "Retrying Miruro…"
+                        else "Retry Miruro servers",
+                    )
+                }
+            }
+            TextButton(onClick = onClose) {
+                Text("Close")
+            }
         }
     }
 }

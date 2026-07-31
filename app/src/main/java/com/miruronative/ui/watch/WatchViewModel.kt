@@ -18,6 +18,7 @@ import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.model.hasUsableWindow
 import com.miruronative.data.remote.KonohaEpisode
+import com.miruronative.data.remote.PipeBridge
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.UiState
 import com.miruronative.ui.detail.mergeEpisodeMetadata
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -63,6 +65,8 @@ data class WatchData(
     val isResolving: Boolean = false,
     /** The fast Miruro sources are shown; the slower Anivexa servers are still loading in. */
     val isLoadingMoreSources: Boolean = false,
+    /** A bounded Miruro catalog recovery is queued or running after a failed cold start. */
+    val isRetryingMiruro: Boolean = false,
     /** Track languages discovered per server/audio pair, filled in as sources are validated. */
     val capabilities: Map<Pair<String, Category>, SourceCapabilities> = emptyMap(),
     val notice: String? = null,
@@ -75,6 +79,8 @@ data class WatchData(
     /** Every language seen so far across all options, for the picker's filter row. */
     val knownLanguages: List<String>
         get() = capabilities.values.flatMap { it.languages }.distinct().sorted()
+    val hasMiruroSources: Boolean
+        get() = hasMiruroSourceOptions(sourceOptions)
     val hasNext: Boolean get() = currentIndex < episodes.lastIndex
     val hasPrev: Boolean get() = currentIndex > 0
 }
@@ -165,6 +171,9 @@ class WatchViewModel : ViewModel() {
     private var episodeMetaJob: Job? = null
     private var anivexaMergeJob: Job? = null
     private var miruroLateMergeJob: Job? = null
+    private var miruroRecoveryJob: Job? = null
+    private var miruroAutoRetryAttempted = false
+    private var miruroRecoveryPending = false
     private var sourceValidationJob: Job? = null
     private var sourceValidationIsExhaustive = false
     private var skipLookupJob: Job? = null
@@ -202,6 +211,9 @@ class WatchViewModel : ViewModel() {
         episodeMetaJob?.cancel()
         anivexaMergeJob?.cancel()
         miruroLateMergeJob?.cancel()
+        miruroRecoveryJob?.cancel()
+        miruroAutoRetryAttempted = false
+        miruroRecoveryPending = false
         sourceValidationJob?.cancel()
         sourceValidationIsExhaustive = false
         // Runs beside source resolution: providers hand back bare numbered lists, so without this
@@ -210,8 +222,13 @@ class WatchViewModel : ViewModel() {
         resolveJob = viewModelScope.launch {
             _state.value = UiState.Loading
             _loadingStatus.value = null
+            var pipeWarmSession: AutoCloseable? = null
             try {
                 SettingsStore.awaitLoaded()
+                // v0.1.49 was reliable because this browser was already resident. Hold one
+                // bounded session instead: it starts when Watch really needs Miruro and survives
+                // the catalog -> first-source hand-off, then disappears as playback begins.
+                pipeWarmSession = PipeBridge.acquireWarmSession("initial-watch-$id")
                 val storedPreferred = SettingsStore.preferredProvider.value
                 globalPreferredProvider = storedPreferred
                 preferred = preferredProviderForWatch(storedPreferred, providerName)
@@ -262,7 +279,11 @@ class WatchViewModel : ViewModel() {
                         repo.mergeProviders(miruro, fast)
                     }
                 }
-                if (miruroResult == null) launchMiruroLateMerge(id, miruroDeferred)
+                if (miruroResult == null) {
+                    launchMiruroLateMerge(id, miruroDeferred)
+                } else if (miruro.isEmpty) {
+                    scheduleMiruroRecovery(id, "initial catalog failed")
+                }
                 DiagnosticsLog.event(
                     "Watch episodes load success id=$id providers=" +
                         merged.providers.joinToString { provider ->
@@ -321,6 +342,8 @@ class WatchViewModel : ViewModel() {
                 DiagnosticsLog.throwable("Watch start failed key=$key", e)
                 _loadingStatus.value = null
                 _state.value = UiState.Error(e.message ?: "Failed to load episode")
+            } finally {
+                pipeWarmSession?.close()
             }
         }
     }
@@ -333,25 +356,104 @@ class WatchViewModel : ViewModel() {
     private fun launchMiruroLateMerge(id: Int, deferred: kotlinx.coroutines.Deferred<Result<EpisodesResult>>) {
         miruroLateMergeJob?.cancel()
         miruroLateMergeJob = viewModelScope.launch {
-            val late = runCatching { deferred.await() }.getOrNull()?.getOrNull() ?: return@launch
-            if (late.isEmpty) return@launch
-            mergedEpisodes = repo.mergeProviders(late, mergedEpisodes)
-            spine = retainNonEmptyNavigationSpine(spine, pickSpine(mergedEpisodes))
-            DiagnosticsLog.event(
-                "Watch miruro late merge applied id=$id providers=" + late.providerNames.joinToString(),
-            )
-            val data = (_state.value as? UiState.Success)?.data ?: return@launch
-            val number = data.current.number
-            val index = spine.indexOfFirst { it.number == number }.coerceAtLeast(0)
-            _state.value = UiState.Success(
-                data.copy(
-                    episodes = spine,
-                    currentIndex = index,
-                    sourceOptions = sourceOptions(number),
-                        capabilities = sourceCapabilities.toMap(),
-                ),
-            )
-            launchSourceValidation(number)
+            val result = try {
+                deferred.await()
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
+                Result.failure(e)
+            }
+            val late = result.getOrNull()
+            if (late == null || late.isEmpty) {
+                result.exceptionOrNull()?.let {
+                    DiagnosticsLog.throwable("Watch miruro late catalog failed id=$id", it)
+                }
+                scheduleMiruroRecovery(id, "late catalog failed")
+                return@launch
+            }
+            applyMiruroCatalog(id, late, "late")
+        }
+    }
+
+    /** Queue at most one automatic retry so a transient cold-start miss repairs the live picker. */
+    private fun scheduleMiruroRecovery(id: Int, reason: String) {
+        if (id != anilistId || miruroAutoRetryAttempted || miruroRecoveryJob?.isActive == true) return
+        miruroAutoRetryAttempted = true
+        setMiruroRecoveryPending(true)
+        DiagnosticsLog.event(
+            "Watch miruro recovery scheduled id=$id delayMs=$MIRURO_RECOVERY_DELAY_MS reason=$reason",
+        )
+        miruroRecoveryJob = viewModelScope.launch {
+            delay(MIRURO_RECOVERY_DELAY_MS)
+            refreshMiruroCatalog(id, "automatic")
+        }
+    }
+
+    /** User-visible retry from the source picker; unlike the automatic path it starts now. */
+    fun retryMiruroServers() {
+        val id = anilistId
+        if (id <= 0) return
+        DiagnosticsLog.event("Watch miruro retry requested id=$id")
+        miruroRecoveryJob?.cancel()
+        miruroAutoRetryAttempted = true
+        setMiruroRecoveryPending(true)
+        miruroRecoveryJob = viewModelScope.launch {
+            refreshMiruroCatalog(id, "manual")
+        }
+    }
+
+    private suspend fun refreshMiruroCatalog(id: Int, trigger: String) {
+        PipeBridge.prepareForRetry()
+        val warmSession = PipeBridge.acquireWarmSession("$trigger-miruro-retry-$id")
+        try {
+            val refreshed = try {
+                repo.miruroEpisodes(id, force = true)
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
+                DiagnosticsLog.throwable("Watch miruro $trigger retry failed id=$id", e)
+                null
+            }
+            if (refreshed != null && !refreshed.isEmpty) {
+                applyMiruroCatalog(id, refreshed, trigger)
+            } else {
+                DiagnosticsLog.event("Watch miruro $trigger retry returned no providers id=$id")
+            }
+        } finally {
+            warmSession.close()
+            if (id == anilistId) setMiruroRecoveryPending(false)
+        }
+    }
+
+    /** Merge recovered providers without replacing the stream that is already playing. */
+    private fun applyMiruroCatalog(id: Int, catalog: EpisodesResult, trigger: String) {
+        if (id != anilistId || catalog.isEmpty) return
+        val recoveredProviders = catalog.providerNames.toSet()
+        unavailableSources.removeAll { it.provider in recoveredProviders }
+        mergedEpisodes = repo.mergeProviders(catalog, mergedEpisodes)
+        spine = retainNonEmptyNavigationSpine(spine, pickSpine(mergedEpisodes))
+        DiagnosticsLog.event(
+            "Watch miruro $trigger merge applied id=$id providers=" +
+                recoveredProviders.sorted().joinToString(),
+        )
+        val data = (_state.value as? UiState.Success)?.data ?: return
+        val number = data.current.number
+        val index = spine.indexOfFirst { it.number == number }.coerceAtLeast(0)
+        _state.value = UiState.Success(
+            data.copy(
+                episodes = spine,
+                currentIndex = index,
+                sourceOptions = sourceOptions(number),
+                capabilities = sourceCapabilities.toMap(),
+                isRetryingMiruro = false,
+            ),
+        )
+        launchSourceValidation(number)
+    }
+
+    private fun setMiruroRecoveryPending(pending: Boolean) {
+        miruroRecoveryPending = pending
+        val data = (_state.value as? UiState.Success)?.data ?: return
+        if (data.isRetryingMiruro != pending) {
+            _state.value = UiState.Success(data.copy(isRetryingMiruro = pending))
         }
     }
 
@@ -567,6 +669,7 @@ class WatchViewModel : ViewModel() {
                 preferredProvider = globalPreferredProvider,
                 isResolving = false,
                 isLoadingMoreSources = !mergedIncludesAnivexa,
+                isRetryingMiruro = miruroRecoveryPending,
                 notice = fallbackNotice,
             ),
         )
@@ -1150,6 +1253,8 @@ internal fun shouldSyncAniListProgress(episodeNumber: Double, positionMs: Long, 
 
 private const val MIN_ANILIST_SYNC_DURATION_MS = 60_000L
 private const val ANILIST_SYNC_WATCHED_FRACTION = 0.80
+/** Let fallback playback settle before one bounded background resolver recovery. */
+private const val MIRURO_RECOVERY_DELAY_MS = 15_000L
 private const val SOURCE_VALIDATION_START_DELAY_MS = 10_000L
 private const val SOURCE_VALIDATION_FALLBACK_TARGET = 2
 private const val SOURCE_VALIDATION_MAX_AUTOMATIC_ATTEMPTS = 6
@@ -1229,6 +1334,11 @@ internal fun preferredProviderForWatch(storedPreferred: String?, routeProvider: 
     val stored = storedPreferred?.trim()?.lowercase().orEmpty()
     if (stored.isNotBlank() && stored != DEFAULT_PREFERRED_PROVIDER) return stored
     return routeProvider.trim().lowercase().ifBlank { DEFAULT_PREFERRED_PROVIDER }
+}
+
+/** Whether the picker already contains at least one provider from the Miruro pipe catalog. */
+internal fun hasMiruroSourceOptions(options: List<WatchSourceOption>): Boolean = options.any {
+    ProviderCatalog.sourceOf(it.provider) == ProviderCatalog.Source.MIRURO
 }
 
 /**

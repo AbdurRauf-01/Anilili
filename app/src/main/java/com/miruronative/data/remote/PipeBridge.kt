@@ -14,6 +14,8 @@ import android.webkit.WebViewClient
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -37,12 +39,17 @@ internal fun pipePageReadyTimeoutMs(
     mirrorTimeoutMs: Long,
     pageSettleMs: Long,
     schedulerGraceMs: Long,
+    rememberedMirrorExtraMs: Long = 0L,
 ): Long {
     require(originCount > 0) { "originCount must be positive" }
-    require(mirrorTimeoutMs >= 0 && pageSettleMs >= 0 && schedulerGraceMs >= 0) {
+    require(
+        mirrorTimeoutMs >= 0 && pageSettleMs >= 0 && schedulerGraceMs >= 0 &&
+            rememberedMirrorExtraMs >= 0,
+    ) {
         "pipe timeout components must be non-negative"
     }
-    return originCount.toLong() * mirrorTimeoutMs + pageSettleMs + schedulerGraceMs
+    return originCount.toLong() * mirrorTimeoutMs + rememberedMirrorExtraMs +
+        pageSettleMs + schedulerGraceMs
 }
 
 /** Outer provider budget must not cancel the bridge while its bounded cold start is still active. */
@@ -51,6 +58,22 @@ internal fun pipeSourceAttemptTimeoutMs(
     responseTimeoutMs: Long,
     completionGraceMs: Long,
 ): Long = pageReadyTimeoutMs + responseTimeoutMs + completionGraceMs
+
+/**
+ * A mirror that already worked on this network gets a little longer to answer before failover.
+ * This preserves the useful part of the old always-warm resolver without making every cold,
+ * unknown mirror extend the full startup walk.
+ */
+internal fun pipeMirrorWatchdogTimeoutMs(
+    origin: String,
+    lastWorkingOrigin: String,
+    standardTimeoutMs: Long,
+    rememberedTimeoutMs: Long,
+): Long = if (lastWorkingOrigin.isNotBlank() && origin == lastWorkingOrigin) {
+    rememberedTimeoutMs
+} else {
+    standardTimeoutMs
+}
 
 internal const val PIPE_SOURCE_RESPONSE_TIMEOUT_MS = 8_000L
 
@@ -118,11 +141,13 @@ object PipeBridge {
      * sources" for a title with plenty. Rolling over on our own clock keeps that bounded.
      */
     private const val MIRROR_TIMEOUT_MS = 7_000L
+    private const val REMEMBERED_MIRROR_TIMEOUT_MS = 12_000L
     private val PAGE_READY_TIMEOUT_MS = pipePageReadyTimeoutMs(
         originCount = ORIGINS.size,
         mirrorTimeoutMs = MIRROR_TIMEOUT_MS,
         pageSettleMs = PAGE_SETTLE_MS,
         schedulerGraceMs = READY_SCHEDULER_GRACE_MS,
+        rememberedMirrorExtraMs = REMEMBERED_MIRROR_TIMEOUT_MS - MIRROR_TIMEOUT_MS,
     )
 
     /** Used by the repository's outer timeout so it cannot pre-empt an on-demand cold start. */
@@ -136,6 +161,8 @@ object PipeBridge {
     @Volatile private var ready = CompletableDeferred<Boolean>()
     @Volatile private var originAttempts = ORIGINS
     @Volatile private var originIndex = 0
+    @Volatile private var rememberedOrigin = ""
+    @Volatile private var pageReadyState: Boolean? = null
     @Volatile private var unavailableUntilElapsedMs = 0L
     private val pending = ConcurrentHashMap<String, CompletableDeferred<String>>()
     private val counter = AtomicLong(0)
@@ -143,13 +170,22 @@ object PipeBridge {
     private val activeOrigin: String get() = originAttempts[originIndex]
 
     private val mirrorWatchdog = Runnable {
-        DiagnosticsLog.event("PipeBridge mirror timed out after ${MIRROR_TIMEOUT_MS}ms origin=$activeOrigin")
+        DiagnosticsLog.event(
+            "PipeBridge mirror timed out after ${activeMirrorTimeoutMs()}ms origin=$activeOrigin",
+        )
         advanceMirror()
     }
 
+    private fun activeMirrorTimeoutMs(): Long = pipeMirrorWatchdogTimeoutMs(
+        origin = activeOrigin,
+        lastWorkingOrigin = rememberedOrigin,
+        standardTimeoutMs = MIRROR_TIMEOUT_MS,
+        rememberedTimeoutMs = REMEMBERED_MIRROR_TIMEOUT_MS,
+    )
+
     private fun armMirrorWatchdog() {
         main.removeCallbacks(mirrorWatchdog)
-        main.postDelayed(mirrorWatchdog, MIRROR_TIMEOUT_MS)
+        main.postDelayed(mirrorWatchdog, activeMirrorTimeoutMs())
     }
 
     /** Rolls to the next mirror, or gives up once they are exhausted. Main thread only. */
@@ -164,7 +200,46 @@ object PipeBridge {
         } else {
             DiagnosticsLog.event("PipeBridge all mirrors failed")
             unavailableUntilElapsedMs = SystemClock.elapsedRealtime() + FAILURE_COOLDOWN_MS
+            pageReadyState = false
             ready.complete(false)
+        }
+    }
+
+    /**
+     * Keeps the hidden browser mounted across a related sequence such as episode-catalog lookup
+     * followed by the first source lookup. The caller must close the returned session. Individual
+     * fetches still hold their own leases, so closing a session cannot interrupt an active request.
+     */
+    internal fun acquireWarmSession(reason: String): AutoCloseable {
+        DiagnosticsLog.event("PipeBridge warm session acquired reason=$reason")
+        val lease = demand.acquire()
+        return AutoCloseable {
+            DiagnosticsLog.event("PipeBridge warm session released reason=$reason")
+            lease.close()
+        }
+    }
+
+    /**
+     * Allows one user/WatchViewModel-directed retry to bypass the passive failure cooldown. If a
+     * failed page is still attached, restart its mirror walk; otherwise the next demand mounts a
+     * fresh WebView and [attach] starts it normally.
+     */
+    internal suspend fun prepareForRetry() {
+        unavailableUntilElapsedMs = 0L
+        withContext(Dispatchers.Main.immediate) {
+            val wv = webView ?: return@withContext
+            if (pageReadyState != false) return@withContext
+            main.removeCallbacks(idleRunnable)
+            main.removeCallbacks(mirrorWatchdog)
+            ready = CompletableDeferred()
+            pageReadyState = null
+            rememberedOrigin = SettingsStore.lastWorkingPipeOrigin.value
+            originAttempts = orderedPipeOrigins(ORIGINS, rememberedOrigin)
+            originIndex = 0
+            DiagnosticsLog.event("PipeBridge explicit retry origin=$activeOrigin")
+            wv.onResume()
+            armMirrorWatchdog()
+            wv.loadUrl("$activeOrigin/")
         }
     }
 
@@ -175,6 +250,7 @@ object PipeBridge {
         webView = wv
         com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("pipe", true)
         if (ready.isCompleted) ready = CompletableDeferred()
+        pageReadyState = null
 
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
@@ -220,6 +296,7 @@ object PipeBridge {
                         {
                             if (!ready.isCompleted) {
                                 unavailableUntilElapsedMs = 0L
+                                pageReadyState = true
                                 ready.complete(true)
                             }
                             scheduleIdle()
@@ -258,7 +335,8 @@ object PipeBridge {
         }
         // Start from whichever mirror last answered on this network, then wrap around the list so
         // a stale last-working value cannot make earlier mirrors unreachable.
-        originAttempts = orderedPipeOrigins(ORIGINS, SettingsStore.lastWorkingPipeOrigin.value)
+        rememberedOrigin = SettingsStore.lastWorkingPipeOrigin.value
+        originAttempts = orderedPipeOrigins(ORIGINS, rememberedOrigin)
         originIndex = 0
         DiagnosticsLog.event("PipeBridge load origin=$activeOrigin")
         armMirrorWatchdog()
@@ -274,6 +352,7 @@ object PipeBridge {
         webView = null
         com.miruronative.diagnostics.ResolverDiagnostics.viewChanged("pipe", false)
         ready = CompletableDeferred()
+        pageReadyState = null
         pending.entries.toList().forEach { (id, request) ->
             if (pending.remove(id, request)) {
                 request.complete("""{"ok":false,"status":-1,"error":"webview released"}""")

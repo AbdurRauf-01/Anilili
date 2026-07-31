@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "anilili-diagnostics",
+  "main": "./cloudflare/index.ts",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "upload_source_maps": true,
+  "vars": {
+    "ENVIRONMENT": "production",
+    "HF_NAMESPACE": "anilili",
+    "HF_BUCKET": "anilili-diagnostics"
+  },
+  "secrets": {
+    "required": [
+      "HF_S3_ACCESS_KEY_ID",
+      "HF_S3_SECRET_ACCESS_KEY",
+      "ADMIN_ACCESS_KEY",
+      "RATE_LIMIT_SECRET"
+    ]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT"
+    }
+  ],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/health", "/v1/*", "/api/*"]
+  },
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

@@ -310,13 +310,31 @@ class WatchViewModel : ViewModel() {
                     }
                 }
                 // The mirror case: launches carrying category=dub (prefer-dub defaults from
-                // Watch Now, seeded Continue Watching, or stale history) for a title no provider
-                // dubs. Without this the spine comes up empty and the screen dies with
-                // "No episodes for this title" even though subs exist.
-                if (category == Category.DUB && merged.providers.none { it.dub.isNotEmpty() }) {
-                    if (merged.providers.any { it.sub.isNotEmpty() }) {
+                // Watch Now, seeded Continue Watching, or stale history) where the dub cannot
+                // actually serve this episode. Without this the spine comes up empty and the
+                // screen dies with "No episodes for this title" even though subs exist.
+                //
+                // Judged per episode, not per title. Dubs routinely lag the sub release, so a
+                // long-running show has dubbed early episodes and undubbed recent ones: checking
+                // only "does any dub exist" passed, then every dub server was tried in turn for an
+                // episode none of them had, and the viewer waited out the whole fallback chain to
+                // be told "no server found" for something available in sub all along.
+                if (category == Category.DUB) {
+                    val startNumber = episodeNumber.toDoubleOrNull()
+                    val dubHasEpisode = merged.providers.any { provider ->
+                        provider.dub.isNotEmpty() &&
+                            (startNumber == null || provider.dub.any { it.number == startNumber })
+                    }
+                    val subHasEpisode = merged.providers.any { provider ->
+                        provider.sub.isNotEmpty() &&
+                            (startNumber == null || provider.sub.any { it.number == startNumber })
+                    }
+                    if (!dubHasEpisode && subHasEpisode) {
                         category = Category.SUB
-                        DiagnosticsLog.event("Watch category fell back to sub (no dub catalog) id=$id")
+                        DiagnosticsLog.event(
+                            "Watch category fell back to sub (no dub for episode) id=$id " +
+                                "episode=$episodeNumber",
+                        )
                     }
                 }
                 repo.animeInfo(id)?.let { info ->

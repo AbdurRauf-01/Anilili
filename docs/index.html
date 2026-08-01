@@ -509,6 +509,21 @@ h1 {
   gap: 12px;
 }
 
+/* Separates the phone and TV families so nobody sideloads the wrong build onto a stick. */
+.dl-group {
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.dl-group:first-child {
+  margin-top: 0;
+}
+
 .dl-link {
   display: flex;
   align-items: center;
@@ -647,7 +662,7 @@ footer {
     <div class="logo">
       <img src="assets/icon.png" alt="Anilili Logo" />
       <span>Anilili</span>
-      <span class="logo-tag">v0.1.47</span>
+      <span class="logo-tag">v0.1.56</span>
     </div>
     <nav class="nav-links">
       <a href="#features">Features</a>
@@ -822,16 +837,18 @@ footer {
     <div class="dl-grid">
       <div class="dl-box">
         <h3>Direct APK Downloads</h3>
-        <div class="dl-ver">Latest Release • v0.1.47 • Open Source</div>
+        <div class="dl-ver">Latest Release • v0.1.56 • Open Source</div>
 
         <div class="dl-list">
+          <div class="dl-group">Phones &amp; tablets</div>
+
           <a href="https://github.com/kompoti121/Anilili/releases/latest/download/Anilili.apk" class="dl-link">
             <div class="dl-info">
               <div class="name">
                 Anilili.apk
                 <span class="tag-rec">Universal</span>
               </div>
-              <div class="desc">Recommended — runs on all phones, tablets &amp; TV boxes</div>
+              <div class="desc">Recommended — runs on every phone &amp; tablet</div>
             </div>
             <div class="dl-arrow">↓</div>
           </a>
@@ -839,7 +856,7 @@ footer {
           <a href="https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_arm64-v8a.apk" class="dl-link">
             <div class="dl-info">
               <div class="name">Anilili_arm64-v8a.apk</div>
-              <div class="desc">For modern 64-bit Android smartphones &amp; TV devices</div>
+              <div class="desc">Smaller download for modern 64-bit phones</div>
             </div>
             <div class="dl-arrow">↓</div>
           </a>
@@ -847,7 +864,36 @@ footer {
           <a href="https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_armeabi-v7a.apk" class="dl-link">
             <div class="dl-info">
               <div class="name">Anilili_armeabi-v7a.apk</div>
-              <div class="desc">For legacy 32-bit devices &amp; Fire OS 5 TV Sticks</div>
+              <div class="desc">For legacy 32-bit devices</div>
+            </div>
+            <div class="dl-arrow">↓</div>
+          </a>
+
+          <div class="dl-group">Android TV, Google TV &amp; Fire TV</div>
+
+          <a href="https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv.apk" class="dl-link">
+            <div class="dl-info">
+              <div class="name">
+                Anilili_tv.apk
+                <span class="tag-rec">TV</span>
+              </div>
+              <div class="desc">Recommended for the living room — leaner, no Cast stack</div>
+            </div>
+            <div class="dl-arrow">↓</div>
+          </a>
+
+          <a href="https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv_arm64-v8a.apk" class="dl-link">
+            <div class="dl-info">
+              <div class="name">Anilili_tv_arm64-v8a.apk</div>
+              <div class="desc">64-bit TV boxes &amp; newer Fire TV sticks</div>
+            </div>
+            <div class="dl-arrow">↓</div>
+          </a>
+
+          <a href="https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv_armeabi-v7a.apk" class="dl-link">
+            <div class="dl-info">
+              <div class="name">Anilili_tv_armeabi-v7a.apk</div>
+              <div class="desc">32-bit Fire OS 5 TV sticks</div>
             </div>
             <div class="dl-arrow">↓</div>
           </a>

@@ -1,0 +1,419 @@
+package com.anilili.ui.watch
+
+import android.view.KeyEvent
+import androidx.media3.common.PlaybackException
+import com.anilili.data.model.SourcesResult
+import com.anilili.data.model.Category
+import com.anilili.data.model.EpisodeItem
+import com.anilili.data.model.EpisodesResult
+import com.anilili.data.model.ProviderData
+import com.anilili.data.model.StreamItem
+import com.anilili.data.settings.DefaultQuality
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class WatchSourcePolicyTest {
+
+    @Test
+    fun `playback speeds cover rewatching without crowding the slider`() {
+        // The list is slider notches, so its length is the usability budget. It used to spend
+        // eight of fifteen steps between 0.9x and 1.3x, leaving nothing above 2x for rewatching.
+        assertTrue("normal speed must be selectable", 1f in PlaybackSpeeds)
+        assertTrue("a nudge either side of normal is enough", PlaybackSpeeds.containsAll(listOf(0.9f, 1.1f)))
+        assertTrue("rewatching wants the fast end", PlaybackSpeeds.containsAll(listOf(2f, 3f, 4f)))
+        assertEquals("4x is the ceiling", 4f, PlaybackSpeeds.max())
+        assertTrue("the slider stays readable", PlaybackSpeeds.size <= 15)
+
+        assertEquals(PlaybackSpeeds.sorted(), PlaybackSpeeds)
+        assertEquals(PlaybackSpeeds.distinct(), PlaybackSpeeds)
+        assertEquals("2.5x", 2.5f.formatPlaybackSpeed())
+        assertEquals("4x", 4f.formatPlaybackSpeed())
+    }
+    @Test
+    fun `kiwi plays its embed, not the direct CDN renditions`() {
+        // Verified on a device against a live episode: every direct rendition failed
+        // ("Source error" on vault-16.owocdn.top at 1080p, 720p and 360p) and only the embed
+        // played. Kwik's CDN URLs need the page's cookies and player flow.
+        val hls = stream("https://vault.example/1080.m3u8", "hls", "1080p", active = true)
+        val embed = stream("https://kwik.example/e/id", "embed", "1080p", active = true)
+
+        assertEquals(embed, pickProviderStream("kiwi", sources(hls, embed)))
+    }
+
+    @Test
+    fun `a failed kiwi embed still tries the direct renditions before giving up on kiwi`() {
+        // The embed leads, but the direct streams remain as a safety net rather than the whole
+        // provider being abandoned for an unrelated server on the first failure.
+        val hls = stream("https://vault.example/1080.m3u8", "hls", "1080p", active = true)
+        val embed = stream("https://kwik.example/e/id", "embed", "1080p", active = true)
+
+        assertEquals(
+            hls,
+            nextProviderStream(
+                provider = "kiwi",
+                sources = sources(hls, embed),
+                currentUrl = embed.url,
+                failedUrls = setOf(embed.url),
+            ),
+        )
+
+        // With both tried there is nothing left, so the caller moves on to another provider.
+        assertNull(
+            nextProviderStream(
+                provider = "kiwi",
+                sources = sources(hls, embed),
+                currentUrl = hls.url,
+                failedUrls = setOf(hls.url, embed.url),
+            ),
+        )
+    }
+
+    @Test
+    fun `ally uses progressive file before unreliable HLS mirror`() {
+        val direct = stream("https://files.example/video.mp4", "video", "1080p")
+        val hls = stream("https://mirror.example/master.m3u8", "hls", "auto", active = true)
+
+        assertEquals(direct, pickProviderStream("ally", sources(direct, hls)))
+    }
+
+    @Test
+    fun `other providers retain active HLS preference`() {
+        val direct = stream("https://files.example/video.mp4", "video", "1080p")
+        val hls = stream("https://cdn.example/master.m3u8", "hls", "auto", active = true)
+
+        assertEquals(hls, pickProviderStream("bonk", sources(direct, hls)))
+    }
+
+    @Test
+    fun `allanime orders every stream before provider fallback`() {
+        val mp4 = stream("https://files.example/video.mp4", "mp4", "AllAnime 1080p Yt-mp4", active = true)
+        val primaryHls = stream("https://primary.example/master.m3u8", "hls", "AllAnime Ac")
+        val backupHls = stream("https://backup.example/master.m3u8", "hls", "AllAnime Luf-hls")
+        val embed = stream("https://embed.example/e/id", "embed", "AllAnime Ok")
+        val result = sources(mp4, primaryHls, backupHls, embed)
+
+        assertEquals(
+            listOf(primaryHls, backupHls, mp4, embed),
+            providerStreamOrder("allanime", result),
+        )
+    }
+
+    @Test
+    fun `allanime advances through untried streams and stops when exhausted`() {
+        val primaryHls = stream("https://primary.example/master.m3u8", "hls", "AllAnime Ac", active = true)
+        val backupHls = stream("https://backup.example/master.m3u8", "hls", "AllAnime Luf-hls")
+        val mp4 = stream("https://files.example/video.mp4", "mp4", "AllAnime 1080p Yt-mp4")
+        val embed = stream("https://embed.example/e/id", "embed", "AllAnime Ok")
+        val result = sources(primaryHls, backupHls, mp4, embed)
+
+        assertEquals(
+            backupHls,
+            nextProviderStream("allanime", result, primaryHls.url, setOf(primaryHls.url)),
+        )
+        assertEquals(
+            mp4,
+            nextProviderStream("allanime", result, backupHls.url, setOf(primaryHls.url, backupHls.url)),
+        )
+        assertEquals(
+            embed,
+            nextProviderStream("allanime", result, mp4.url, setOf(primaryHls.url, backupHls.url, mp4.url)),
+        )
+        assertNull(
+            nextProviderStream(
+                "allanime",
+                result,
+                embed.url,
+                setOf(primaryHls.url, backupHls.url, mp4.url, embed.url),
+            ),
+        )
+        assertEquals(
+            primaryHls,
+            nextProviderStream(
+                "allanime",
+                sources(primaryHls, backupHls),
+                backupHls.url,
+                setOf(backupHls.url),
+            ),
+        )
+    }
+
+    @Test
+    fun `saved provider overrides each watch route`() {
+        assertEquals("allanime", preferredProviderForWatch("allanime", "bonk"))
+        assertEquals("allanime", preferredProviderForWatch(" AllAnime ", "kiwi"))
+    }
+
+    @Test
+    fun `first watch keeps route provider until user chooses a global provider`() {
+        assertEquals("bonk", preferredProviderForWatch("auto", "bonk"))
+        assertEquals("kiwi", preferredProviderForWatch(null, " Kiwi "))
+    }
+
+    @Test
+    fun `blank watch provider falls back to automatic selection`() {
+        assertEquals("auto", preferredProviderForWatch("auto", " "))
+    }
+
+    @Test
+    fun `source miss retries when the first catalog snapshot predated the full merge`() {
+        assertTrue(
+            shouldRetryWithMergedCatalog(
+                hasResolvedSource = false,
+                initialCatalogIncludedFullAnivexa = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryWithMergedCatalog(
+                hasResolvedSource = false,
+                initialCatalogIncludedFullAnivexa = true,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryWithMergedCatalog(
+                hasResolvedSource = true,
+                initialCatalogIncludedFullAnivexa = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `background sweep never starts a hidden player during playback`() {
+        assertEquals(false, validatesDuringPlayback("reanime"))
+        assertEquals(false, validatesDuringPlayback("bonk"))
+        assertEquals(false, validatesDuringPlayback("allanime"))
+        assertTrue(validatesDuringPlayback("anibd"))
+    }
+
+    @Test
+    fun `tv controls keep progress display out of remote focus order`() {
+        assertEquals(
+            listOf(
+                TvPlayerControl.PREVIOUS,
+                TvPlayerControl.REWIND,
+                TvPlayerControl.PLAY_PAUSE,
+                TvPlayerControl.FORWARD,
+                TvPlayerControl.NEXT,
+                TvPlayerControl.MUTE,
+                TvPlayerControl.CAPTIONS,
+                TvPlayerControl.SETTINGS,
+                TvPlayerControl.FULLSCREEN,
+            ),
+            tvPlayerControlOrder(hasCaptions = true, hasSettings = true, hasFullscreen = true),
+        )
+    }
+
+    @Test
+    fun `direction and confirm keys open tv controls`() {
+        assertTrue(opensTvPlayerControls(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertTrue(opensTvPlayerControls(KeyEvent.KEYCODE_DPAD_RIGHT))
+        assertTrue(opensTvPlayerControls(KeyEvent.KEYCODE_DPAD_UP))
+        assertTrue(opensTvPlayerControls(KeyEvent.KEYCODE_DPAD_DOWN))
+        assertTrue(opensTvPlayerControls(KeyEvent.KEYCODE_DPAD_CENTER))
+        assertEquals(false, opensTvPlayerControls(KeyEvent.KEYCODE_MEDIA_NEXT))
+    }
+
+    @Test
+    fun `rapid tv seeks accumulate and stay inside the episode`() {
+        val first = tvSeekTargetMs(currentPositionMs = 30_000L, durationMs = 60_000L, offsetMs = TV_SEEK_STEP_MS)
+        val second = tvSeekTargetMs(currentPositionMs = first, durationMs = 60_000L, offsetMs = TV_SEEK_STEP_MS)
+
+        assertEquals(50_000L, second)
+        assertEquals(60_000L, tvSeekTargetMs(second, 60_000L, 20_000L))
+        assertEquals(0L, tvSeekTargetMs(5_000L, 60_000L, -TV_SEEK_STEP_MS))
+    }
+
+    @Test
+    fun `only a recent seek io error receives same stream recovery`() {
+        assertTrue(shouldRecoverSeekError(errorCode = 2_002, elapsedSinceSeekMs = 500L, recoveryAlreadyAttempted = false))
+        assertEquals(
+            false,
+            shouldRecoverSeekError(errorCode = 2_002, elapsedSinceSeekMs = 500L, recoveryAlreadyAttempted = true),
+        )
+        assertEquals(
+            false,
+            shouldRecoverSeekError(
+                errorCode = 2_002,
+                elapsedSinceSeekMs = SEEK_ERROR_RECOVERY_WINDOW_MS + 1L,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRecoverSeekError(errorCode = 4_001, elapsedSinceSeekMs = 500L, recoveryAlreadyAttempted = false),
+        )
+    }
+
+    @Test
+    fun `a seek that was never recorded gets no recovery`() {
+        // This is the shape of the reported "my server changes when I skip" bug: the seek marker
+        // was only written by the TV D-pad path, so a phone scrub or a seek-bar drag left elapsed
+        // at MAX_VALUE and the stale-segment error that follows a seek failed straight over to
+        // another provider. PlayerSurface now records every seek via onPositionDiscontinuity.
+        assertEquals(
+            false,
+            shouldRecoverSeekError(
+                errorCode = 2_002,
+                elapsedSinceSeekMs = Long.MAX_VALUE,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+        // ...and with the seek recorded, the same error is retried on the current server instead.
+        assertTrue(
+            shouldRecoverSeekError(
+                errorCode = 2_002,
+                elapsedSinceSeekMs = 0L,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+        assertTrue(
+            shouldRecoverSeekError(
+                errorCode = 2_999,
+                elapsedSinceSeekMs = SEEK_ERROR_RECOVERY_WINDOW_MS,
+                recoveryAlreadyAttempted = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `quality height is recovered from provider label`() {
+        assertEquals(1080, declaredVideoHeight("AllAnime 1080p Yt-mp4"))
+        assertEquals(720, declaredVideoHeight("720P"))
+        assertEquals(360, declaredVideoHeight("360p Data Saver"))
+        assertEquals(null, declaredVideoHeight("AllAnime auto"))
+    }
+
+    @Test
+    fun `audio decoder failure skips ineffective video resolution retry`() {
+        assertEquals(
+            false,
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                rendererName = "MediaCodecAudioRenderer",
+                sampleMimeType = "audio/mp4a-latm",
+                errorMessage = "Decoder failed: c2.android.aac.decoder",
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                rendererName = null,
+                sampleMimeType = null,
+                errorMessage = "MediaCodecAudioRenderer error",
+            ),
+        )
+    }
+
+    @Test
+    fun `video decoder failure retains one lower resolution recovery`() {
+        assertTrue(
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                rendererName = "MediaCodecVideoRenderer",
+                sampleMimeType = "video/avc",
+                errorMessage = "Decoder failed",
+            ),
+        )
+        assertEquals(
+            false,
+            shouldRetryDecoderAtLowerVideoResolution(
+                errorCode = 2_002,
+                rendererName = "MediaCodecVideoRenderer",
+                sampleMimeType = "video/avc",
+                errorMessage = "Network error",
+            ),
+        )
+    }
+
+    @Test
+    fun `automatic source validation is bounded while explicit validation is exhaustive`() {
+        assertEquals(1, sourceValidationConcurrency(isTv = true))
+        assertEquals(2, sourceValidationConcurrency(isTv = false))
+        assertEquals(6, sourceValidationCandidateLimit(exhaustive = false))
+        assertEquals(Int.MAX_VALUE, sourceValidationCandidateLimit(exhaustive = true))
+    }
+
+    @Test
+    fun `data saver explains when a server has no 360p rendition`() {
+        assertEquals(
+            "360p is unavailable on this server. Data Saver is using 480p.",
+            dataSaverFallbackMessage(DefaultQuality.P360, listOf(1080, 720, 480)),
+        )
+        assertEquals(null, dataSaverFallbackMessage(DefaultQuality.P360, listOf(720, 360)))
+        assertEquals(null, dataSaverFallbackMessage(DefaultQuality.P480, listOf(1080, 720)))
+    }
+
+    @Test
+    fun `navigation spine removes duplicate rows and orders episode numbers`() {
+        val preferred = ProviderData("bonk", listOf(episode(1), episode(2)), emptyList())
+        val noisy = ProviderData("hop", listOf(episode(2), episode(1), episode(2), episode(3)), emptyList())
+
+        val spine = pickNavigationSpine(EpisodesResult(listOf(preferred, noisy)), "bonk", Category.SUB)
+
+        assertEquals(listOf(1.0, 2.0, 3.0), spine.map(EpisodeItem::number))
+    }
+
+    @Test
+    fun `navigation spine keeps preferred provider on a normalized tie`() {
+        val preferredEpisode = episode(1, id = "preferred")
+        val preferred = ProviderData("bonk", listOf(preferredEpisode, episode(2)), emptyList())
+        val other = ProviderData("hop", listOf(episode(1), episode(2), episode(2)), emptyList())
+
+        val spine = pickNavigationSpine(EpisodesResult(listOf(preferred, other)), "bonk", Category.SUB)
+
+        assertEquals("preferred", spine.first().pipeId)
+    }
+
+    @Test
+    fun `late sub-only catalog cannot erase active dubbed navigation spine`() {
+        val activeDub = listOf(episode(1, id = "active-dub"))
+        val lateCatalog = EpisodesResult(
+            listOf(ProviderData("bonk", sub = listOf(episode(1)), dub = emptyList())),
+        )
+        val lateDubSpine = pickNavigationSpine(lateCatalog, "bonk", Category.DUB)
+
+        assertTrue(lateDubSpine.isEmpty())
+        assertEquals(activeDub, retainNonEmptyNavigationSpine(activeDub, lateDubSpine))
+    }
+
+    @Test
+    fun `late dubbed catalog still refreshes active navigation spine`() {
+        val activeDub = listOf(episode(1, id = "active-dub"))
+        val refreshedDub = listOf(episode(1, id = "refreshed-dub"), episode(2))
+
+        assertEquals(refreshedDub, retainNonEmptyNavigationSpine(activeDub, refreshedDub))
+    }
+
+    @Test
+    fun `anilist progress waits until most of a full integer episode was watched`() {
+        assertTrue(shouldSyncAniListProgress(3.0, positionMs = 1_200_000, durationMs = 1_440_000))
+        assertEquals(false, shouldSyncAniListProgress(3.0, positionMs = 600_000, durationMs = 1_440_000))
+        assertEquals(false, shouldSyncAniListProgress(3.5, positionMs = 1_300_000, durationMs = 1_440_000))
+        assertEquals(false, shouldSyncAniListProgress(3.0, positionMs = 45_000, durationMs = 50_000))
+    }
+
+    private fun sources(vararg streams: StreamItem) = SourcesResult(streams.toList(), emptyList(), null, null)
+
+    private fun stream(url: String, type: String, quality: String, active: Boolean = false) = StreamItem(
+        url = url,
+        type = type,
+        quality = quality,
+        audio = null,
+        referer = null,
+        isActive = active,
+        width = null,
+        height = null,
+    )
+
+    private fun episode(number: Int, id: String = "episode-$number") = EpisodeItem(
+        pipeId = id,
+        number = number.toDouble(),
+        title = null,
+        image = null,
+        filler = false,
+    )
+}

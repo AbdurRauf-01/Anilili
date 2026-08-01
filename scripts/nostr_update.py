@@ -16,7 +16,8 @@ The signing key is read from nostr-update-key.properties at the repo root
 
 Commands:
     keygen                                  Generate a new keypair (only if you must rotate!)
-    publish --version 0.1.54 --apk-url URL [--changelog TEXT] [--size-bytes N] [--dry-run]
+    publish --version 0.1.56 --apk-url URL [--tv-apk-url URL] [--changelog TEXT]
+            [--size-bytes N] [--tv-size-bytes N] [--dry-run]
     fetch                                   Show the manifest relays currently return
 
 Every version bump: publish right after the GitHub release so both channels agree.
@@ -121,10 +122,33 @@ def cmd_keygen(_args: argparse.Namespace) -> None:
     print(f"Bake this pubkey into NostrUpdateSource.MANIFEST_PUBKEY_HEX:\n  {sk.public_key_xonly.format().hex()}")
 
 
+def _variant(url: str, size_bytes: int | None) -> dict:
+    entry: dict = {"url": url}
+    if size_bytes is not None:
+        entry["sizeBytes"] = size_bytes
+    return entry
+
+
 def cmd_publish(args: argparse.Namespace) -> None:
+    # --apk-url stays the phone build: every install published before the mobile/TV flavor split
+    # reads only this field, and pointing it at a TV APK would push the wrong build to phones.
     manifest = {"version": args.version, "changelog": args.changelog or "", "apkUrl": args.apk_url}
     if args.size_bytes is not None:
         manifest["sizeBytes"] = args.size_bytes
+    # Newer apps read "variants" and pick by form factor; older ones ignore it and use apkUrl.
+    variants = {}
+    if args.apk_url:
+        variants["mobile"] = _variant(args.apk_url, args.size_bytes)
+    if args.tv_apk_url:
+        variants["tv"] = _variant(args.tv_apk_url, args.tv_size_bytes)
+    if variants:
+        manifest["variants"] = variants
+    if not args.tv_apk_url:
+        print(
+            "WARNING: no --tv-apk-url given. Android TV installs will fall back to the phone "
+            "build, which carries Cast and its Play Services dependency.",
+            file=sys.stderr,
+        )
     content = json.dumps(manifest, separators=(",", ":"), ensure_ascii=False)
     event = sign_event(PrivateKey(bytes.fromhex(load_secret_hex())), content)
     if not verify_event(event):
@@ -206,6 +230,8 @@ def main() -> None:
     publish.add_argument("--apk-url", required=True, help="direct download URL of the APK asset")
     publish.add_argument("--changelog", default="", help="release notes text")
     publish.add_argument("--size-bytes", type=int, default=None, help="APK size; used only for progress display")
+    publish.add_argument("--tv-apk-url", default=None, help="direct download URL of the Android TV APK (Anilili_tv.apk)")
+    publish.add_argument("--tv-size-bytes", type=int, default=None, help="TV APK size; used only for progress display")
     publish.add_argument("--dry-run", action="store_true", help="print the signed event without broadcasting")
     publish.set_defaults(func=cmd_publish)
 

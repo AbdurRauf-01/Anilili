@@ -1,0 +1,68 @@
+package com.anilili.ui.watch
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class PlayerGestureControlsTest {
+    @Test
+    fun playbackTogglePausesEvenWhilePlaybackIsBuffering() {
+        assertEquals(false, playerToggleWillPlay(playWhenReady = true))
+        assertEquals(true, playerToggleWillPlay(playWhenReady = false))
+    }
+
+    @Test
+    fun horizontalSlideSeeksRelativeToDragDistance() {
+        assertEquals(
+            630_000L,
+            playerSlideSeekTarget(
+                startPositionMs = 600_000L,
+                durationMs = 1_440_000L,
+                horizontalDragPx = 250f,
+                widthPx = 1_000f,
+            ),
+        )
+        assertEquals(
+            570_000L,
+            playerSlideSeekTarget(
+                startPositionMs = 600_000L,
+                durationMs = 1_440_000L,
+                horizontalDragPx = -250f,
+                widthPx = 1_000f,
+            ),
+        )
+    }
+
+    @Test
+    fun horizontalSlideClampsToVideoBounds() {
+        assertEquals(0L, playerSlideSeekTarget(10_000L, 60_000L, -1_000f, 1_000f))
+        assertEquals(60_000L, playerSlideSeekTarget(50_000L, 60_000L, 1_000f, 1_000f))
+    }
+
+    @Test
+    fun horizontalSlideWithoutDurationKeepsCurrentPosition() {
+        assertEquals(15_000L, playerSlideSeekTarget(15_000L, 0L, 500f, 1_000f))
+    }
+
+    @Test
+    fun verticalDragSplitsBrightnessAndVolumeDownTheMiddle() {
+        assertEquals(GestureZone.Brightness, playerGestureZone(0f, 1_000f, dragGestures = true))
+        assertEquals(GestureZone.Brightness, playerGestureZone(499f, 1_000f, dragGestures = true))
+        assertEquals(GestureZone.Volume, playerGestureZone(500f, 1_000f, dragGestures = true))
+        assertEquals(GestureZone.Volume, playerGestureZone(1_000f, 1_000f, dragGestures = true))
+    }
+
+    @Test
+    fun midPictureDragsStillPickASideRatherThanGoingInert() {
+        // The old edge strips reached ~28% in from each side and left the middle dead; every
+        // horizontal position now belongs to one control or the other.
+        assertEquals(GestureZone.Brightness, playerGestureZone(400f, 1_000f, dragGestures = true))
+        assertEquals(GestureZone.Volume, playerGestureZone(600f, 1_000f, dragGestures = true))
+    }
+
+    @Test
+    fun disabledGesturesAndDegenerateSurfacesClaimNothing() {
+        assertEquals(null, playerGestureZone(100f, 1_000f, dragGestures = false))
+        assertEquals(null, playerGestureZone(100f, 0f, dragGestures = true))
+        assertEquals(null, playerGestureZone(Float.NaN, 1_000f, dragGestures = true))
+    }
+}

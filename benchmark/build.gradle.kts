@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.miruronative.benchmark"
+    namespace = "com.anilili.benchmark"
     compileSdk = 36
     buildToolsVersion = "35.0.1"
 

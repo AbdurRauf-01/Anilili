@@ -15,20 +15,24 @@
     <uses-feature android:name="android.hardware.faketouch" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
+    <!--
+        largeHeap: the app runs a Compose UI, an ExoPlayer, and up to two WebViews (the resolver
+        bridge and an embed player) in one process. On a Fire TV stick the standard ceiling is
+        192 MB, and a heap-exhaustion OutOfMemoryError lands wherever the next allocation happens
+        to be — one crash report died inside a routine SharedPreferences write. Devices flagged
+        low-RAM ignore the flag, so it only lifts the ceiling where there is memory to lift it to.
+    -->
     <application
         android:name=".MiruroApp"
         android:allowBackup="false"
         android:banner="@drawable/tv_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:largeHeap="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MiruroNative"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
-
-        <meta-data
-            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
-            android:value="androidx.media3.cast.DefaultCastOptionsProvider" />
 
         <activity
             android:name=".MainActivity"
@@ -79,6 +83,18 @@
         </service>
 
         <!--
+            EpisodeDownloadService hands Media3 a PlatformScheduler so paused downloads resume when
+            their requirements are met again. PlatformScheduler schedules work against this
+            JobService, and JobScheduler rejects a component the manifest never declared:
+            "IllegalArgumentException: No such service" killed the app on the main thread whenever
+            the download manager reconsidered its queue.
+        -->
+        <service
+            android:name="androidx.media3.exoplayer.scheduler.PlatformScheduler$PlatformSchedulerService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!--
             MP4 exports run as long-running WorkManager work, which promotes WorkManager's own
             service to the foreground. From Android 14 that service must carry a type, and only
             the app's manifest can give it one.
@@ -87,11 +103,6 @@
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
-
-        <!-- Lets Android 13+ System UI move this MediaSession between the phone and Cast routes. -->
-        <receiver
-            android:name="androidx.mediarouter.media.MediaTransferReceiver"
-            android:exported="true" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

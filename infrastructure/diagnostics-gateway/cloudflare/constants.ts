@@ -11,6 +11,10 @@ export const MAX_REPORTS_PER_DAY = 200;
 export const MAX_BYTES_PER_DAY = 2_000_000_000;
 export const RETENTION_DAYS = 30;
 export const ADMIN_REPORT_LIMIT = 40;
+/** Ceiling on the inflated events file read for source telemetry. */
+export const MAX_SOURCE_EVENT_BYTES = 8_000_000;
+/** Ceiling on resolve.summary lines folded per report, so one bundle cannot dominate CPU. */
+export const MAX_EVENTS_SCANNED = 5_000;
 export const SESSION_SECONDS = 8 * 60 * 60;
 export const LOGIN_WINDOW_SECONDS = 15 * 60;
 export const MAX_LOGIN_FAILURES = 8;

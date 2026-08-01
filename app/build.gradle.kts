@@ -18,8 +18,8 @@ val diagnosticBuildSha = providers.environmentVariable("GITHUB_SHA").orNull
             isIgnoreExitValue = true
         }.standardOutput.asText.get().trim()
     }.getOrDefault("unknown").ifBlank { "unknown" }
-val appVersionCode = 55
-val appVersionName = "0.1.54"
+val appVersionCode = 57
+val appVersionName = "0.1.56"
 val diagnosticsUploadUrl = providers.gradleProperty("diagnosticsUploadUrl").orNull
     ?: providers.environmentVariable("DIAGNOSTICS_UPLOAD_URL").orNull
     ?: "https://anilili-diagnostics.anilili.workers.dev"
@@ -30,7 +30,7 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.miruronative"
+    namespace = "com.anilili"
     compileSdk = 36
     buildToolsVersion = "35.0.1"
 
@@ -78,6 +78,26 @@ android {
         }
     }
 
+    // One codebase, two shipped apps. The split is a build variant rather than a fork: every
+    // defect found so far (the download-scheduler crash, the progress-attribution race, the
+    // AniList pacing regression) lived in shared logic and would have had to be fixed twice in
+    // two repositories. What genuinely differs is what each form factor should even contain —
+    // Google Cast is meaningless on a TV that *is* the cast target, and on Fire TV its Play
+    // Services shell throws on every service start ("No acceptable module ... dynamite").
+    //
+    // applicationId is deliberately identical across flavors: changing it would orphan every
+    // existing install from its updates and its saved library.
+    flavorDimensions += "form"
+    productFlavors {
+        create("mobile") {
+            dimension = "form"
+            isDefault = true
+        }
+        create("tv") {
+            dimension = "form"
+        }
+    }
+
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
@@ -121,24 +141,38 @@ android {
             // GitHub orders assets by name: '.' sorts before '_', so "Anilili.apk" (universal,
             // runs on every ABI) must precede "Anilili_<abi>.apk". Never name splits with '-';
             // '-' sorts before '.' and legacy TVs would fetch an incompatible split.
+            //
+            // The mobile flavor keeps the historical names exactly, because every install out
+            // there is already looking for them. TV assets take an extra "_tv" segment, which
+            // sorts after all of the mobile names, so a legacy updater still lands on the
+            // universal mobile APK rather than a build meant for a different form factor.
+            val formSuffix = if (flavorName == "tv") "_tv" else ""
             output.outputFileName = if (abi == null) {
-                "Anilili$buildTypeSuffix.apk"
+                "Anilili$buildTypeSuffix$formSuffix.apk"
             } else {
-                "Anilili${buildTypeSuffix}_$abi.apk"
+                "Anilili$buildTypeSuffix${formSuffix}_$abi.apk"
             }
         }
     }
 }
 
-val archiveReleaseMapping by tasks.registering(Copy::class) {
-    dependsOn("minifyReleaseWithR8")
-    from(layout.buildDirectory.file("outputs/mapping/release/mapping.txt"))
-    into(layout.buildDirectory.dir("outputs/mapping-archive"))
-    rename("mapping.txt", "mapping-v$appVersionName-$appVersionCode-$diagnosticBuildSha.txt")
-}
-
-tasks.matching { it.name == "assembleRelease" }.configureEach {
-    finalizedBy(archiveReleaseMapping)
+// Crash reports arrive obfuscated, so every shipped build's mapping has to be kept. With the
+// mobile/TV flavors there are two of them per release, and the flavor has to be in the filename
+// or the second one silently overwrites the first — a report from a TV would then be deobfuscated
+// against the phone build and produce plausible, wrong class names.
+listOf("mobile", "tv").forEach { flavor ->
+    val variant = "${flavor}Release"
+    val archiveTask = tasks.register<Copy>("archive${variant.replaceFirstChar(Char::uppercase)}Mapping") {
+        dependsOn("minify${variant.replaceFirstChar(Char::uppercase)}WithR8")
+        from(layout.buildDirectory.file("outputs/mapping/$variant/mapping.txt"))
+        into(layout.buildDirectory.dir("outputs/mapping-archive"))
+        rename(
+            "mapping.txt",
+            "mapping-$flavor-v$appVersionName-$appVersionCode-$diagnosticBuildSha.txt",
+        )
+    }
+    tasks.matching { it.name == "assemble${variant.replaceFirstChar(Char::uppercase)}" }
+        .configureEach { finalizedBy(archiveTask) }
 }
 
 dependencies {
@@ -167,7 +201,9 @@ dependencies {
     implementation(libs.androidx.media3.datasource)
     implementation(libs.androidx.media3.datasource.cronet)
     implementation(libs.androidx.media3.database)
-    implementation(libs.androidx.media3.cast)
+    // Cast is mobile-only. It also drags in play-services-cast-framework and mediarouter, so
+    // scoping it here is what actually makes the TV build smaller, not just tidier.
+    "mobileImplementation"(libs.androidx.media3.cast)
     implementation(libs.androidx.media3.transformer)
     implementation(libs.play.services.cronet)
     implementation(libs.androidx.appcompat)

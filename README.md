@@ -120,14 +120,30 @@ sources. Availability can vary by title, language, region, and provider uptime.
   </a>
 </p>
 
-For a TV or Fire TV device, download the APK with a TV browser/Downloader app or transfer it
-from another device, then open it with the system package installer.
+On a TV or Fire TV device, download the **TV build** with a TV browser/Downloader app or transfer
+it from another device, then open it with the system package installer.
+
+### Phones and tablets
 
 | APK | Best for |
 | --- | --- |
-| [Anilili.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili.apk) | **Recommended.** Universal build for phones, tablets, Android TV, and Fire TV. |
-| [Anilili_arm64-v8a.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_arm64-v8a.apk) | Most modern 64-bit phones and TV devices. |
-| [Anilili_armeabi-v7a.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_armeabi-v7a.apk) | Older 32-bit Android and Fire OS devices. |
+| [Anilili.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili.apk) | **Recommended.** Universal build, runs on every phone and tablet. |
+| [Anilili_arm64-v8a.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_arm64-v8a.apk) | Smaller download for modern 64-bit devices. |
+| [Anilili_armeabi-v7a.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_armeabi-v7a.apk) | Older 32-bit devices. |
+
+### Android TV, Google TV and Fire TV
+
+| APK | Best for |
+| --- | --- |
+| [Anilili_tv.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv.apk) | **Recommended.** Universal TV build. |
+| [Anilili_tv_arm64-v8a.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv_arm64-v8a.apk) | 64-bit TV boxes and newer Fire TV sticks. |
+| [Anilili_tv_armeabi-v7a.apk](https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv_armeabi-v7a.apk) | 32-bit Fire OS sticks. |
+
+The TV build is the same app tuned for the living room: it drops Google Cast (a TV is where a cast
+*ends up*, and Fire TV's Play Services cannot serve the Cast module at all), which makes it about
+1 MB smaller and removes a class of start-up failure. Both builds share an application id, so an
+existing install updates in place either way — and the in-app updater keeps each device on its own
+build.
 
 **Compatibility:** Android 5.1 / Fire OS 5 (API 22) or newer.
 
@@ -169,15 +185,24 @@ On Windows:
 gradlew.bat assembleDebug
 ```
 
-Debug and release builds produce a universal APK plus `arm64-v8a` and `armeabi-v7a` variants.
-The in-app updater depends on these release asset names:
+The app builds in two product flavors on one codebase — `mobile` and `tv` — and each produces a
+universal APK plus `arm64-v8a` and `armeabi-v7a` variants:
 
-- `Anilili.apk`
-- `Anilili_arm64-v8a.apk`
-- `Anilili_armeabi-v7a.apk`
+```bash
+./gradlew assembleMobileRelease assembleTvRelease
+```
 
-The underscore before the ABI is intentional. It keeps the universal APK first in GitHub's asset
-ordering so older app versions do not accidentally download an incompatible architecture build.
+The in-app updater depends on these six release asset names:
+
+- `Anilili.apk`, `Anilili_arm64-v8a.apk`, `Anilili_armeabi-v7a.apk` (phones and tablets)
+- `Anilili_tv.apk`, `Anilili_tv_arm64-v8a.apk`, `Anilili_tv_armeabi-v7a.apk` (TV)
+
+The underscore before the ABI is intentional. It keeps the universal phone APK first in GitHub's
+asset ordering so older app versions do not accidentally download an incompatible build. **Upload
+the phone assets before the TV ones:** the GitHub API returns assets in upload order, and updaters
+from 0.1.33–0.1.55 take the first name containing their ABI, which would otherwise match a `_tv`
+asset. From 0.1.56 the updater filters by form factor first and only falls back to the phone
+family when a release has no TV assets.
 
 ### Publishing an update (every version bump)
 
@@ -186,18 +211,24 @@ manifest (fallback, used when GitHub is unreachable or the repo is gone). Both m
 on every release so they never disagree:
 
 1. Bump `appVersionCode` and `appVersionName` in `app/build.gradle.kts`.
-2. Build the release APKs: `./gradlew assembleRelease` (produces `Anilili.apk`,
-   `Anilili_arm64-v8a.apk`, `Anilili_armeabi-v7a.apk`).
-3. Create/edit the rolling GitHub release with the three APKs attached under the names above.
+2. Build the release APKs: `./gradlew assembleMobileRelease assembleTvRelease` (produces the six
+   assets listed above).
+3. Create/edit the rolling GitHub release with all six APKs attached, phone assets uploaded first.
 4. Publish the same release to Nostr:
 
    ```bash
    scripts/.venv/Scripts/python scripts/nostr_update.py publish \
-     --version 0.1.54 \
+     --version 0.1.56 \
      --apk-url "https://github.com/kompoti121/Anilili/releases/latest/download/Anilili.apk" \
+     --tv-apk-url "https://github.com/kompoti121/Anilili/releases/latest/download/Anilili_tv.apk" \
      --changelog "What changed in this release" \
-     --size-bytes 12345678
+     --size-bytes 12345678 \
+     --tv-size-bytes 12345678
    ```
+
+   `--apk-url` must stay the **phone** build: installs published before the flavor split read only
+   that field. The TV URL rides in a `variants` object that older apps ignore. The script warns if
+   you omit `--tv-apk-url`, which would send Android TV devices the phone build.
 
    Verify what apps will see with `scripts/nostr_update.py fetch`.
 

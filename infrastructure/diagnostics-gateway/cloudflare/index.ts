@@ -9,6 +9,7 @@ import {
   reserveUpload,
 } from "./auth";
 import { inspectDiagnosticZip } from "./archive";
+import { mergeSourceHealth, readZipEntry, summarizeSourceEvents } from "./source-health";
 import {
   ADMIN_REPORT_LIMIT,
   MAX_BYTES_PER_DAY,
@@ -207,7 +208,15 @@ async function uploadReport(request: Request, env: Env): Promise<Response> {
     throw new HttpError(429, "Daily diagnostic capacity reached; the app will retry later");
   }
 
-  const archive = inspectDiagnosticZip(await reportValue.arrayBuffer(), appVersion);
+  const reportBytes = await reportValue.arrayBuffer();
+  const archive = inspectDiagnosticZip(reportBytes, appVersion);
+  // Folded now, while the archive is already in memory, so the console can aggregate server
+  // performance across every report without fetching any of them back out of storage. Purely
+  // additive: a bundle without playback, or from a build predating the telemetry, simply has no
+  // rollup, and a malformed one must never fail an otherwise valid upload.
+  const sourceHealth = await readZipEntry(reportBytes, "events.jsonl")
+    .then((events) => (events ? summarizeSourceEvents(events) : null))
+    .catch(() => null);
   const validationMs = performance.now() - started;
   const metadata: ReportMetadata = {
     reportId,
@@ -224,6 +233,7 @@ async function uploadReport(request: Request, env: Env): Promise<Response> {
       screenshotBytes: screenshot.size,
       screenshotContentType: screenshot.type as "image/jpeg" | "image/png" | "image/webp",
     } : {}),
+    ...(sourceHealth ? { sourceHealth } : {}),
     ...archive,
   };
   const storageStarted = performance.now();
@@ -283,6 +293,43 @@ async function adminReports(request: Request, env: Env): Promise<Response> {
   const limit = Math.min(ADMIN_REPORT_LIMIT, Math.max(1, Number.isFinite(requested) ? requested : ADMIN_REPORT_LIMIT));
   const [reports, today] = await Promise.all([listIndexedReports(env, limit), dailyUsage(env)]);
   return jsonResponse({ reports, today, retentionDays: RETENTION_DAYS });
+}
+
+/**
+ * Server performance across every retained report.
+ *
+ * Answers the question the raw archives could only answer one at a time: which servers actually
+ * serve this audience, how quickly, and when they do not — whether that is a timeout, an empty
+ * catalog, or an outright error.
+ */
+async function adminSourceHealth(request: Request, env: Env): Promise<Response> {
+  await requireAdmin(request, env);
+  const url = new URL(request.url);
+  const appVersion = url.searchParams.get("appVersion")?.trim();
+  const platform = url.searchParams.get("platform")?.trim();
+  const reports = await listIndexedReports(env, ADMIN_REPORT_LIMIT);
+  const matching = reports.filter((report) =>
+    (!appVersion || report.appVersion === appVersion) &&
+    (!platform || report.platform === platform)
+  );
+  const rollups = matching
+    .map((report) => report.sourceHealth)
+    .filter((rollup): rollup is NonNullable<typeof rollup> => Boolean(rollup));
+  const merged = mergeSourceHealth(rollups);
+  const providers = Object.entries(merged.providers)
+    .map(([provider, stat]) => ({
+      provider,
+      ...stat,
+      successRate: stat.attempts > 0 ? Number((stat.ok / stat.attempts).toFixed(3)) : 0,
+    }))
+    .sort((left, right) => right.attempts - left.attempts);
+  return jsonResponse({
+    reports: matching.length,
+    reportsWithPlayback: rollups.length,
+    resolves: merged.resolves,
+    resolved: merged.resolved,
+    providers,
+  });
 }
 
 async function downloadReport(request: Request, env: Env, reportId: string): Promise<Response> {
@@ -367,6 +414,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ authenticated: false }, 200, { "Set-Cookie": clearAdminCookie() });
   }
   if (key === "GET /api/admin/reports") return adminReports(request, env);
+  if (key === "GET /api/admin/source-health") return adminSourceHealth(request, env);
 
   const reportMatch = url.pathname.match(
     /^\/api\/admin\/reports\/(ANL-[0-9]{8}-[A-Z0-9]{10})(?:\/(download|screenshot))?$/,

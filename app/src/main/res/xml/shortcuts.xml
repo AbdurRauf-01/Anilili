@@ -10,6 +10,6 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.miruronative"
-            android:targetClass="com.miruronative.diagnostics.ShareDiagnosticsActivity" />
+            android:targetClass="com.anilili.diagnostics.ShareDiagnosticsActivity" />
     </shortcut>
 </shortcuts>

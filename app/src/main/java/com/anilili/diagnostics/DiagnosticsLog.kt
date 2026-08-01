@@ -549,6 +549,10 @@ object DiagnosticsLog {
             "memoryAvailableMb" to (memory.availMem / 1024 / 1024).toString(),
             "memoryLow" to memory.lowMemory.toString(),
             "memoryThresholdMb" to (memory.threshold / 1024 / 1024).toString(),
+            // Requests still open well past the point of usefulness, with the phase each reached.
+            // A caller that gives up before OkHttp does leaves no completion event, so without
+            // this a report can show a screen failing to load and nothing about why.
+            "httpStalled" to DiagnosticsHttpEventListener.InFlight.stalled().ifEmpty { "none" },
             "heapUsedMb" to ((runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024).toString(),
             "heapMaxMb" to (runtime.maxMemory() / 1024 / 1024).toString(),
             "storageAvailableMb" to (app.filesDir.usableSpace / 1024 / 1024).toString(),

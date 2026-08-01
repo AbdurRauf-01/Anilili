@@ -1,5 +1,7 @@
 package com.anilili.data
 
+import com.anilili.data.model.Category
+
 /**
  * Provider classification across both streaming backends:
  * - **Miruro** pipe providers (via the on-device WebView bridge)
@@ -47,6 +49,28 @@ object ProviderCatalog {
     // page runs a real player, so resolving one competes for the hardware video decoder with
     // whatever is already on screen — background validation skips these during playback.
     val webViewResolverProviders = setOf("reanime")
+
+    /**
+     * Servers whose single stream carries several audio tracks rather than separate sub and dub
+     * entries.
+     *
+     * Their catalog lists the episode only under sub, because to the catalog there is one file —
+     * but that file contains Japanese *and* English audio, and the player picks between them. A
+     * dub search that only reads the catalog therefore concludes the server has no dub, abandons
+     * it, and switches to another server, throwing away an English track the viewer could see
+     * sitting in the audio menu. [dubCapableCategory] is what stops that.
+     */
+    val multiAudioProviders = setOf("reanime", "kaa")
+
+    /**
+     * Which catalog category to search for [category] on [provider].
+     *
+     * Everything resolves under the category asked for, except a dub request on a multi-audio
+     * server, which resolves its sub entry — the same file — and lets the player select the
+     * English track.
+     */
+    fun dubCapableCategory(provider: String, category: Category): Category =
+        if (category == Category.DUB && provider.lowercase() in multiAudioProviders) Category.SUB else category
 
     /** Any source lookup that must create a hidden browser, regardless of returned stream type. */
     fun requiresResolverWebView(provider: String): Boolean =

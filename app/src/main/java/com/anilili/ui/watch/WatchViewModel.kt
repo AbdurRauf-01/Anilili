@@ -322,8 +322,15 @@ class WatchViewModel : ViewModel() {
                 if (category == Category.DUB) {
                     val startNumber = episodeNumber.toDoubleOrNull()
                     val dubHasEpisode = merged.providers.any { provider ->
-                        provider.dub.isNotEmpty() &&
-                            (startNumber == null || provider.dub.any { it.number == startNumber })
+                        // A multi-audio server counts as dub-capable through its sub list: that
+                        // one file carries the English track. Without this the app decides no dub
+                        // exists, drops to sub, and the player then picks Japanese — the exact
+                        // complaint, with an English option sitting unused in the audio menu.
+                        val list = provider.episodes(
+                            ProviderCatalog.dubCapableCategory(provider.name, Category.DUB),
+                        )
+                        list.isNotEmpty() &&
+                            (startNumber == null || list.any { it.number == startNumber })
                     }
                     val subHasEpisode = merged.providers.any { provider ->
                         provider.sub.isNotEmpty() &&
@@ -1492,8 +1499,10 @@ internal fun pickNavigationSpine(
     preferred: String,
     category: Category,
 ): List<EpisodeItem> {
+    // Multi-audio servers list one set of episodes carrying both audio tracks, so a dub request
+    // has to read their sub list or the spine comes back empty and navigation dies.
     fun normalized(provider: String): List<EpisodeItem> = episodes.provider(provider)
-        ?.episodes(category)
+        ?.episodes(ProviderCatalog.dubCapableCategory(provider, category))
         .orEmpty()
         .distinctBy(EpisodeItem::number)
         .sortedBy(EpisodeItem::number)

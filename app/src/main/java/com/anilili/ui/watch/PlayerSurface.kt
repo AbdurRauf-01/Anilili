@@ -401,7 +401,7 @@ fun PlayerSurface(
                     DiagnosticsLog.event("PlayerSurface tracks ${tracks.diagnosticSummary()}")
                     tracksRevision++
                     val mediaId = activeController.currentMediaItem?.mediaId ?: return
-                    if (currentProvider !in MULTI_AUDIO_PROVIDERS || audioPreferenceAppliedFor == mediaId) return
+                    if (currentProvider.lowercase() !in com.anilili.data.ProviderCatalog.multiAudioProviders || audioPreferenceAppliedFor == mediaId) return
                     if (applyCategoryAudioPreference(activeController, currentCategory, currentProvider)) {
                         audioPreferenceAppliedFor = mediaId
                     }
@@ -1477,7 +1477,6 @@ internal fun categoryAudioRank(name: String, wantsDub: Boolean): Int {
     }
 }
 
-private val MULTI_AUDIO_PROVIDERS = setOf("reanime", "kaa")
 
 private fun applyTextTrack(context: Context, controller: MediaController, option: TrackOption?) {
     if (

@@ -964,7 +964,11 @@ class MiruroRepository(
         )
         val candidates = ordered.mapNotNull { name ->
             val provider = episodes.provider(name) ?: return@mapNotNull null
-            val episode = provider.episodes(category).firstOrNull { it.number == number }
+            // A multi-audio server lists the episode only under sub even though the file carries
+            // an English track too. Searching it under sub keeps it in the running for a dub
+            // request instead of silently handing the viewer over to a different server.
+            val lookup = ProviderCatalog.dubCapableCategory(name, category)
+            val episode = provider.episodes(lookup).firstOrNull { it.number == number }
                 ?: return@mapNotNull null
             ProviderSourceCandidate(name, episode.pipeId)
         }

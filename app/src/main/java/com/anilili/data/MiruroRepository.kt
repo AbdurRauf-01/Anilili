@@ -985,6 +985,10 @@ class MiruroRepository(
         // query can group by.
         val attemptLog = mutableListOf<String>()
         val resolveStartedAt = SystemClock.elapsedRealtime()
+        // Captured before the first attempt: a Miruro-backed server resolving slowly from a cold
+        // bridge is a resolver-lifecycle cost, the same server resolving slowly from a warm one
+        // is the provider itself. Without this the two are the same number.
+        val bridgeWarmAtStart = PipeBridge.isWarm()
         val resolution = resolveProviderCandidates(
             candidates = candidates,
             excludedProviders = excludedProviders + coolingProviders,
@@ -1069,6 +1073,7 @@ class MiruroRepository(
                 "outcomes" to attemptLog.joinToString(","),
                 "cooling" to coolingProviders.sorted().joinToString(","),
                 "candidates" to candidates.size,
+                "bridge" to if (bridgeWarmAtStart) "warm" else "cold",
             ),
         )
         return SourceResolution(

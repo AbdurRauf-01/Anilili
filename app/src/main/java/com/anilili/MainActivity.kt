@@ -472,6 +472,15 @@ private fun MiruroRoot(
     val pipeResolverRequired by PipeBridge.resolverRequired.collectAsState()
     val flixcloudResolverRequired by FlixcloudBridge.resolverRequired.collectAsState()
     val hanimeResolverRequired by HanimeBridge.resolverRequired.collectAsState()
+    val playbackActive by PlaybackStatus.isPlaying.collectAsState()
+    // Constructing a WebView during first composition delays the first visible frame, badly so on
+    // a TV stick. The warm bridge is worth having, but not at the cost of a slower cold start, so
+    // it is stood up once the UI has settled.
+    var resolverWebViewsReady by remember { mutableStateOf(false) }
+    LaunchedEffect(deviceProfile.isTv) {
+        delay(if (deviceProfile.isTv) 6_000 else 2_500)
+        resolverWebViewsReady = true
+    }
     val hideAdult by SettingsStore.hideAdultContent.collectAsState()
 
     LaunchedEffect(deviceProfile.isTv, currentRoute) {
@@ -607,11 +616,21 @@ private fun MiruroRoot(
                     }
                 }
             }
-            // Resolver browsers are expensive on low-memory TVs and are never players. Keep each
-            // one attached only while its bridge has a real request waiting or running. Their
-            // reference-counted demand survives concurrent repository calls, while disposal after
-            // the last request prevents an idle Chromium renderer from competing with playback.
-            if (pipeResolverRequired) {
+            // The Miruro bridge is kept alive between requests rather than rebuilt for each one.
+            //
+            // Tearing it down after the last request meant every resolve that followed an idle
+            // gap paid to construct a WebView, load a mirror and clear Cloudflare before it could
+            // run a single fetch — users reported exactly this as servers "loading fast on 0.1.49
+            // and slow after", which is the release that made it on-demand. PipeBridge already
+            // calls onPause() once idle, so a resident bridge is a paused renderer holding a page,
+            // not one burning CPU.
+            //
+            // TV still gives it up during playback. That is the one window where the memory
+            // genuinely matters (96-192 MB heaps, low-RAM sticks) and where a hidden browser has
+            // been seen taking the hardware decoder away from the video. Everywhere else — all of
+            // mobile, and TV while browsing — it stays warm.
+            val keepPipeBridgeWarm = !deviceProfile.isTv || !playbackActive
+            if (pipeResolverRequired || (resolverWebViewsReady && keepPipeBridgeWarm)) {
                 PipeWebView()
             }
             if (flixcloudResolverRequired) {

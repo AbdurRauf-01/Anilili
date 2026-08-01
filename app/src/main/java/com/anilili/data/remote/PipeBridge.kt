@@ -369,7 +369,19 @@ object PipeBridge {
     }
 
     /** Runs `fetch('/api/secure/pipe?e=…')` inside the page and returns the raw JSON bridge payload. */
+    /**
+     * Whether a request would find the bridge already loaded and past Cloudflare.
+     *
+     * A cold bridge has to build a WebView, load a mirror and clear the challenge before it can
+     * run a single fetch; a warm one runs the fetch immediately. Recording which of the two a
+     * resolve started from is what separates "our resolver was asleep" from "this server is
+     * genuinely slow upstream" — the two look identical in a wall-clock duration.
+     */
+    fun isWarm(): Boolean = webView != null && pageReadyState == true
+
     suspend fun fetch(e: String, timeoutMs: Long = 30_000): String {
+        val fetchStartedMs = SystemClock.elapsedRealtime()
+        val startedWarm = isWarm()
         var cooldownRemainingMs =
             (unavailableUntilElapsedMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
         if (cooldownRemainingMs > 0L || pageReadyState == false) {
@@ -391,6 +403,18 @@ object PipeBridge {
                 prepareForRetry()
                 pageReady = withTimeoutOrNull(PAGE_READY_TIMEOUT_MS) { ready.await() } == true
             }
+            // How much of this request was spent getting the browser ready, as opposed to talking
+            // to the provider. The two are indistinguishable in the resolve's total duration, and
+            // the answer decides whether keeping the resolver resident is worth its memory.
+            DiagnosticsLog.event(
+                category = "pipe",
+                name = "bridge.ready",
+                attributes = mapOf(
+                    "warm" to startedWarm,
+                    "waitMs" to (SystemClock.elapsedRealtime() - fetchStartedMs),
+                    "ready" to pageReady,
+                ),
+            )
             if (!pageReady) {
                 unavailableUntilElapsedMs = SystemClock.elapsedRealtime() + FAILURE_COOLDOWN_MS
                 DiagnosticsLog.event(

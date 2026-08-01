@@ -116,6 +116,9 @@ class HomeViewModel : ViewModel() {
                 _state.value = UiState.Error(e.message ?: "Failed to load home")
             } finally {
                 if (generation == loadGeneration) _isRefreshing.value = false
+                // Settled either way. Optional startup work waits on this rather than a fixed
+                // delay, so it cannot land on top of the first screen still fetching.
+                com.anilili.ui.FirstContent.mark()
             }
         }
     }

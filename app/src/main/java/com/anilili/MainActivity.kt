@@ -123,6 +123,7 @@ import com.anilili.ui.FlixcloudResolverWebView
 import com.anilili.ui.HanimeResolverWebView
 import com.anilili.ui.AllAnimeCaptchaHost
 import com.anilili.ui.home.HomeScreen
+import com.anilili.ui.FirstContent
 import com.anilili.ui.PipeWebView
 import com.anilili.ui.adaptive.LocalAppDeviceProfile
 import com.anilili.ui.adaptive.TvFocusTarget
@@ -476,11 +477,19 @@ private fun MiruroRoot(
     // Constructing a WebView during first composition delays the first visible frame, badly so on
     // a TV stick. The warm bridge is worth having, but not at the cost of a slower cold start, so
     // it is stood up once the UI has settled.
-    var resolverWebViewsReady by remember { mutableStateOf(false) }
+    //
+    // On TV it additionally waits for the first screen to finish loading. A device report caught
+    // the bridge building itself while home's own request was still in flight — AniList was
+    // unreachable on that network and hung for 12 seconds — so two expensive things ran at once
+    // on a box already dropping frames. Nothing waits on the resolver at startup, so it can.
+    val firstContentSettled by FirstContent.settled.collectAsState()
+    var startupGraceElapsed by remember { mutableStateOf(false) }
     LaunchedEffect(deviceProfile.isTv) {
         delay(if (deviceProfile.isTv) 6_000 else 2_500)
-        resolverWebViewsReady = true
+        startupGraceElapsed = true
     }
+    val resolverWebViewsReady =
+        startupGraceElapsed && (!deviceProfile.isTv || firstContentSettled)
     val hideAdult by SettingsStore.hideAdultContent.collectAsState()
 
     LaunchedEffect(deviceProfile.isTv, currentRoute) {

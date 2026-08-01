@@ -7,18 +7,25 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -132,13 +139,51 @@ fun CaptionAppearanceDialog(
                 // Pinned outside the scroll area so every option change is visible
                 // immediately instead of requiring a swipe back up to the preview.
                 CaptionPreview(style)
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 340.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    CaptionAppearanceEditor(footnote = footnote, showPreview = false)
+                val scroll = rememberScrollState()
+                // The list is taller than the dialog and nothing said so — the settings below the
+                // fold read as the whole set, so options were simply never found. The gradient is
+                // drawn only while there is more to reach and fades out as the end approaches, so
+                // it reads as "keep going" rather than as permanent decoration.
+                val moreBelow by remember {
+                    derivedStateOf {
+                        (scroll.maxValue - scroll.value).coerceAtLeast(0)
+                    }
+                }
+                Box(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 340.dp)
+                            .verticalScroll(scroll),
+                    ) {
+                        CaptionAppearanceEditor(footnote = footnote, showPreview = false)
+                    }
+                    if (moreBelow > 0) {
+                        val strength = (moreBelow / 120f).coerceIn(0f, 1f)
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.Transparent,
+                                            MaterialTheme.colorScheme.surface.copy(alpha = 0.9f * strength),
+                                        ),
+                                    ),
+                                ),
+                        )
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = "More caption settings below",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = strength),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 2.dp)
+                                .size(20.dp),
+                        )
+                    }
                 }
             }
         },
